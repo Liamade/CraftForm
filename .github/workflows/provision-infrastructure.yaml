@@ -39,7 +39,7 @@ jobs:
         
       # give the runner the aws credentials for this specific repo
       - name: Authenticate to AWS
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}  # pass in specific IAM role created in AWS
           aws-region: us-east-1
