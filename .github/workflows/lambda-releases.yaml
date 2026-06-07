@@ -81,7 +81,7 @@ jobs:
       # CREATE GITHUB RELEASE: create a new release in GitHub using the version number from the workflow input
       - name: Publish Release
         id: release  # capture the output of this step to get the release ID
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: CraftForm ${{ inputs.version || github.ref_name }} # set the release name
           tag_name: ${{ inputs.version || github.ref_name }} # set the tag name to the version tag
