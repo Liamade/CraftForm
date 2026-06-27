@@ -15,7 +15,7 @@ import json
 import boto3
 import os  # for accessing environment variables injected into the Lambda
 import discord_api
-import github_api
+from github_api import GithubClient # import the class from github_api
 
 # ==========================================================================================
 #                            MAIN LAMBDA FUNCTION ENTRY POINT
@@ -28,8 +28,8 @@ def handler(event, context):
     # when someone runs /update, the staging function invokes this lambda to re-register commands
     if event.get("action") == "register_commands":
         # SET UP CLIENTS
-        secretsManager = boto3.client("secretsmanager")  # need the bot token to talk to discord
-        secrets = secretsManager.get_secret_value(SecretId="craftform-secrets")
+        secrets_manager = boto3.client("secretsmanager")  # need the bot token to talk to discord
+        secrets = secrets_manager.get_secret_value(SecretId="craftform-secrets")
         secrets_dict = json.loads(secrets["SecretString"])  # secret value is a JSON string
 
         # VARIABLES
@@ -59,23 +59,23 @@ def handler(event, context):
         if event["RequestType"] != "Delete": 
             # ===============================INJECTED VARIABLES===============================
 
-            awsApi_url = os.environ["ApiGatewayUrl"]
+            aws_api_url = os.environ["ApiGatewayUrl"]
             github_username = os.environ["GithubUsername"]
             discord_app_id = os.environ["DiscordAppId"]
 
             # build a dictionary of the variables being passed into github
-            github_var_Dictionary = {
+            github_var_dict = {
                 "HOME_REGION": os.environ["Region"],
                 "STATE_BUCKET": os.environ["HomeBucket"],
             }
-            github_secret_Dictionary = {
+            github_secret_dict = {
                 "AWS_ROLE_ARN": os.environ["GithubActionsRoleArn"]
             }
             # ==================================INITIALIZATION=================================
 
             ssm = boto3.client("ssm")  # create a AWS System Manager client to interact with SSM Parameter Store
-            secretsManager = boto3.client("secretsmanager")  # create a AWS Secrets Manager client to interact with Secrets Manager
-            secrets = secretsManager.get_secret_value(
+            secrets_manager = boto3.client("secretsmanager")  # create a AWS Secrets Manager client to interact with Secrets Manager
+            secrets = secrets_manager.get_secret_value(
                 SecretId="craftform-secrets"
             )  # get the secret value for the secret named "craftform-secrets" from Secrets Manager
             
@@ -85,17 +85,15 @@ def handler(event, context):
             # ================================GITHUB INTEGRATION===============================
             github_pat = secrets_dict["Github-PAT"]  # get the GitHub Personal Access Token from the secrets dictionary
 
-            github_api.fork_repo(github_pat, github_username)  # fork the CraftForm repo into the user's GitHub account and wait for the fork to be ready
+            github_client = GithubClient(github_pat, github_username)
 
-            github_api.enable_github_actions(github_pat, github_username)  # enable GitHub Actions in the forked repo
+            github_client.fork_repo()  # fork the CraftForm repo into the user's GitHub account and wait for the fork to be ready
 
-            # push variables to github
-            github_api.push_varTo_github(github_pat, github_username, github_var_Dictionary)  # push all the repo variables :)
+            github_client.enable_actions()  # enable GitHub Actions in the forked repo
 
-            # push the encrypted secrets to the forked GitHub repo
-            github_api.push_secretsTo_github(
-                github_pat, github_username, github_secret_Dictionary
-            )  
+            github_client.push_variables(github_var_dict)  # push all the repo variables :)
+
+            github_client.push_secrets(github_secret_dict)  # push the encrypted secrets to the forked GitHub repo
 
             # store the GitHub forked repo URL into SSM parameter store
             ssm.put_parameter(
@@ -110,7 +108,7 @@ def handler(event, context):
             discord_bot_token = secrets_dict["Discord-Bot-Token"]  # get the bot token from Secret Manager
 
             discord_api.send_discord_api_url(
-                discord_app_id, awsApi_url, discord_bot_token
+                discord_app_id, aws_api_url, discord_bot_token
             )  # set the API Gateway URL as the interactions endpoint in the Discord
 
             discord_api.register_slash_commands(discord_app_id, discord_bot_token)  # register the slash commands with the Discord API
