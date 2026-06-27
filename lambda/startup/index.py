@@ -14,7 +14,7 @@ import urllib3
 import json
 import boto3
 import os  # for accessing environment variables injected into the Lambda
-import discord_api
+from discord_api import DiscordClient # import the discord client class from discord_api
 from github_api import GithubClient # import the class from github_api
 
 # ==========================================================================================
@@ -32,13 +32,14 @@ def handler(event, context):
         secrets = secrets_manager.get_secret_value(SecretId="craftform-secrets")
         secrets_dict = json.loads(secrets["SecretString"])  # secret value is a JSON string
 
-        # VARIABLES
+        # DISCORD VARIABLES AND CLIENT
         discord_app_id = os.environ["DiscordAppId"]  # injected as an env var on this function already
         discord_bot_token = secrets_dict["Discord-Bot-Token"]  # grab the bot token out of it
+        discord_client = DiscordClient(discord_bot_token, discord_app_id)
 
         # RUN
         try:
-            discord_api.register_slash_commands(discord_app_id, discord_bot_token)  # registers whatever is in slash_commands now
+            discord_client.register_commands()  # registers whatever is in slash_commands now
 
         # ON FAILURE - this path ISN'T cloudformation, so there's no ResponseURL or StackId to hand back.
         except Exception as e:
@@ -48,6 +49,8 @@ def handler(event, context):
 
         # ON SUCCESS
         return {"status": "commands registered :)"}  # staging only tells the user "done" once this comes back clean
+
+
 
     # ========================================STARTUP PATH========================================
 
@@ -104,14 +107,15 @@ def handler(event, context):
             )
 
             # =================================DISCORD INTEGRATION=============================
-
+            # get the bot token secret
             discord_bot_token = secrets_dict["Discord-Bot-Token"]  # get the bot token from Secret Manager
 
-            discord_api.send_discord_api_url(
-                discord_app_id, aws_api_url, discord_bot_token
-            )  # set the API Gateway URL as the interactions endpoint in the Discord
+            # set up discord client
+            discord_client = DiscordClient(discord_bot_token, discord_app_id)
+            
+            discord_client.send_api_url(aws_api_url) # set the API Gateway URL as the interactions endpoint in the Discord
 
-            discord_api.register_slash_commands(discord_app_id, discord_bot_token)  # register the slash commands with the Discord API
+            discord_client.register_commands()  # register the slash commands with the Discord API
 
 
 

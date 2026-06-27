@@ -165,9 +165,6 @@ class GithubClient:
                 print(f"Secret {secret_name} placed :)")
 
 
-
-
-
     # ================================== PUSH VARIABLES ==================================
     def push_variables(self, var_dict):
 

@@ -14,56 +14,64 @@ import urllib3
 import json
 from pathlib import Path
 
-# ==========================================================================================
-#                          SETUP CLIENTS AND GLOBAL VARIABLES
-# ==========================================================================================
-http = urllib3.PoolManager()  # create a new HTTP connection pool manager to make HTTP requests
-
-slash_commands = json.loads((Path(__file__).parent / "slash_commands.json").read_text())
-
 
 # ==========================================================================================
-#                        DISCORD API SETUP AND INTERACTIONS
+#                                    DISCORD CLASS
 # ==========================================================================================
-def send_discord_api_url(discord_app_id, api_url, discord_bot_token):
+class DiscordClient:
 
-    # send a post to the discord API to set the interactions endpoint to the API Gateway URL
-    discordResponse = http.request(
-        "PATCH",
-        f"https://discord.com/api/v10/applications/{discord_app_id}",
-        headers={
-            "Authorization": f"Bot {discord_bot_token}",  # authenticate the request with the bot token
+    def __init__(self, bot_token, app_id):
+        # discord bot token
+        self.bot_token = bot_token
+        # discord app id
+        self.app_id = app_id
+
+        # open an http client
+        self.http = urllib3.PoolManager()
+
+        # headers for the http request
+        self.headers = {
+            "Authorization": f"Bot {self.bot_token}",  # authenticate the request with the bot token
             "Content-Type": "application/json",  # specify that the request body is in JSON
-        },
-        body=json.dumps(
-            {
+        }
+
+    # private method to handle all http requests
+    def _request(self, method, path, body):
+        return self.http.request(
+            method,
+            f"https://discord.com/api/v10/applications/{self.app_id}{path}",
+            headers={**self.headers, "Content-Type": "application/json"},
+            body=json.dumps(body) if body is not None else None,
+        )
+    
+    def send_api_url(self, api_url):
+
+        # send a post to discord API to set the interactions endpoint to the API Gateway URL
+        response = self._request(
+            "PATCH",
+            body = {
                 "interactions_endpoint_url": api_url  # the API Gateway URL to set as the interactions endpoint
             }
-        ),
-    )
+        )
 
-    # make sure the request was successful
-    if discordResponse.status != 200:
-        raise Exception(f"Failed to set Discord interactions endpoint: {discordResponse.status} - {discordResponse.data} :(")
-    else:
-        print("API Gateaway URL set on Discord application :)")
+        # make sure the request was successful
+        if response.status != 200:
+            raise RuntimeError(f"Failed to set Discord interactions endpoint: {response.status} - {response.data} :(")
+        
+        else:
+            print("API Gateaway URL set on Discord application :)")
 
+    def register_commands(self):
 
-def register_slash_commands(discord_app_id, discord_bot_token):
+        # register the slash commands with the Discord API
+        response = self._request(
+            "PUT",
+            "/commands",
+            body = json.loads((Path(__file__).parent / "slash_commands.json").read_text())  # the slash commands from "slash_commands.json"
+        )
 
-    # register the slash commands with the Discord API
-    discordResponse = http.request(
-        "PUT",
-        f"https://discord.com/api/v10/applications/{discord_app_id}/commands",
-        headers={
-            "Authorization": f"Bot {discord_bot_token}",  # authenticate the request with the bot token
-            "Content-Type": "application/json",  # specify that the request body is in JSON
-        },
-        body=json.dumps(slash_commands),  # the list of slash commands to register
-    )
+        if response.status != 200:
+            raise RuntimeError(f"Failed to register slash commands: {response.status} - {response.data} :(")
+        else:
+            print("Slash commands registered with Discord :)")
 
-    # make sure the request was successful
-    if discordResponse.status != 200:
-        raise Exception(f"Failed to register slash commands: {discordResponse.status} - {discordResponse.data} :(")
-    else:
-        print("Slash commands registered with Discord :)")
