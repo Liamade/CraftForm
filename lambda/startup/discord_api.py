@@ -36,7 +36,8 @@ class DiscordClient:
         }
 
     # private method to handle all http requests
-    def _request(self, method, path, body):
+    # path defaults to "" for endpoints that hit the application root (e.g. setting the interactions url)
+    def _request(self, method, path="", body=None):
         return self.http.request(
             method,
             f"https://discord.com/api/v10/applications/{self.app_id}{path}",
@@ -47,6 +48,7 @@ class DiscordClient:
     def send_api_url(self, api_url):
 
         # send a post to discord API to set the interactions endpoint to the API Gateway URL
+        # no path -> PATCH the application object itself at applications/{app_id}
         response = self._request(
             "PATCH",
             body = {
