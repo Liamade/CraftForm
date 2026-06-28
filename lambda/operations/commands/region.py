@@ -9,15 +9,12 @@
 import urllib3
 import json
 from aws_clients import secrets, ssm, ec2
-from ssm_helpers import list_names_under  # shared ssm helpers (add get_json when you read configs)
+from ssm_helpers import list_names_under  # shared ssm helpers
 
 # the prefix every deployed region's config lives under
 REGIONS_PREFIX = "/craftform/regions/"
 
-# the regions CraftForm is willing to deploy into -- a curated global spread.
-# keeps the deploy menu under Discord's 25-option cap and stops anyone from
-# spinning up infra in some far-flung region nobody asked for.
-# maps the raw aws code -> a human-friendly name we show in discord.
+# the regions CraftForm is willing to deploy into 
 REGION_NAMES = {
     "us-east-1":      "US East (N. Virginia)",
     "us-east-2":      "US East (Ohio)",

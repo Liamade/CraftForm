@@ -297,6 +297,7 @@ Resources:
                   - ec2:DescribeSubnets
                   - ec2:DescribeSecurityGroups
                   - ec2:DescribeAvailabilityZones
+                  - ec2:DescribeRegions
                 Resource: '*'
 
               # ---- launch: pinned to the m8g family (cost blast-radius control) ----
@@ -414,15 +415,8 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: SsmReadConfig
-                Effect: Allow
-                Action: [ssm:GetParameter, ssm:GetParameters, ssm:GetParametersByPath]
-                Resource: !Sub arn:aws:ssm:*:${AWS::AccountId}:parameter/craftform/*
-              # the write the operation role is barred from
-              - Sid: SsmWriteConfig
-                Effect: Allow
-                Action: ssm:PutParameter
-                Resource: !Sub arn:aws:ssm:*:${AWS::AccountId}:parameter/craftform/config/*
+              # the github/repo param is now declared statically in the template, so this role
+              # no longer needs any SSM access -- it just reads the secrets bundle and logs
               - Sid: SecretsRead
                 Effect: Allow
                 Action: secretsmanager:GetSecretValue
@@ -551,6 +545,18 @@ Resources:
       Type: String
       Value: !Ref GitHubUsername
       Description: GitHub username for CraftForm integration
+      Tags:
+        Project: craftform
+        Environment: HomeRegion
+
+  # the user's fork, in owner/repo form -- formerly written by the startup function at runtime
+  GithubRepoParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /craftform/config/github/repo
+      Type: String
+      Value: !Sub ${GitHubUsername}/CraftForm
+      Description: The user's CraftForm fork (owner/repo) for CraftForm integration
       Tags:
         Project: craftform
         Environment: HomeRegion
@@ -855,6 +861,8 @@ Resources:
           DiscordAppId: !Ref DiscordAppId
           Region: !Ref AWS::Region
           HomeBucket: !Ref CraftFormHomeBucket
+          # NOTE: the Discord bot token + GitHub PAT are NOT injected here on purpose -- the
+          # function fetches them from Secrets Manager at runtime so they never appear in the config
 
       Timeout: 120 # set a longer timeout for the startup function
       Runtime: python3.12 # runtime for the Lambda function

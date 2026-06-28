@@ -18,6 +18,21 @@ from discord_api import DiscordClient # import the discord client class from dis
 from github_api import GithubClient # import the class from github_api
 
 # ==========================================================================================
+#                            SECRETS
+# ==========================================================================================
+# client lives at module scope so warm invocations reuse the same connection (AWS best practice).
+# the secrets (Discord bot token + GitHub PAT) are fetched at runtime and never stored in the
+# function's env vars, so they don't show up in the Lambda config.
+secrets_manager = boto3.client("secretsmanager")
+
+
+def get_secrets():
+    """Fetch and parse the craftform-secrets bundle from Secrets Manager."""
+    secret = secrets_manager.get_secret_value(SecretId="craftform-secrets")
+    return json.loads(secret["SecretString"])  # secret value is a JSON string
+
+
+# ==========================================================================================
 #                            MAIN LAMBDA FUNCTION ENTRY POINT
 # ==========================================================================================
 
@@ -27,14 +42,10 @@ def handler(event, context):
     # ===============================RE-REGISTER COMMANDS ON UPDATE===============================
     # when someone runs /update, the staging function invokes this lambda to re-register commands
     if event.get("action") == "register_commands":
-        # SET UP CLIENTS
-        secrets_manager = boto3.client("secretsmanager")  # need the bot token to talk to discord
-        secrets = secrets_manager.get_secret_value(SecretId="craftform-secrets")
-        secrets_dict = json.loads(secrets["SecretString"])  # secret value is a JSON string
 
-        # DISCORD VARIABLES AND CLIENT
-        discord_app_id = os.environ["DiscordAppId"]  # injected as an env var on this function already
-        discord_bot_token = secrets_dict["Discord-Bot-Token"]  # grab the bot token out of it
+        # DISCORD VARIABLES AND CLIENT -- app id is injected as an env var, bot token comes from Secrets Manager
+        discord_app_id = os.environ["DiscordAppId"]
+        discord_bot_token = get_secrets()["Discord-Bot-Token"]
         discord_client = DiscordClient(discord_bot_token, discord_app_id)
 
         # RUN
@@ -54,7 +65,7 @@ def handler(event, context):
 
     # ========================================STARTUP PATH========================================
 
-    http = urllib3.PoolManager()  # create a new HTTP connection pool manager to make HTTP requests | have to initalize outside the try statement so it can send Cloudformation responses in case of errors
+    http = urllib3.PoolManager()  # init outside the try so the except/response path below can still reach it
 
     try:  # wrapping entire function in a try catch block because it makes it catches errors and also ensures when deleting cloudformation state, it deletes early
 
@@ -74,19 +85,12 @@ def handler(event, context):
             github_secret_dict = {
                 "AWS_ROLE_ARN": os.environ["GithubActionsRoleArn"]
             }
-            # ==================================INITIALIZATION=================================
 
-            ssm = boto3.client("ssm")  # create a AWS System Manager client to interact with SSM Parameter Store
-            secrets_manager = boto3.client("secretsmanager")  # create a AWS Secrets Manager client to interact with Secrets Manager
-            secrets = secrets_manager.get_secret_value(
-                SecretId="craftform-secrets"
-            )  # get the secret value for the secret named "craftform-secrets" from Secrets Manager
-            
-            
-            secrets_dict = json.loads(secrets["SecretString"])  # the secret value is a JSON string
+            # pull the secrets bundle once; reused by both the GitHub and Discord integrations below
+            secrets = get_secrets()
 
             # ================================GITHUB INTEGRATION===============================
-            github_pat = secrets_dict["Github-PAT"]  # get the GitHub Personal Access Token from the secrets dictionary
+            github_pat = secrets["Github-PAT"]  # GitHub Personal Access Token from Secrets Manager
 
             github_client = GithubClient(github_pat, github_username)
 
@@ -97,18 +101,11 @@ def handler(event, context):
             github_client.push_variables(github_var_dict)  # push all the repo variables :)
 
             github_client.push_secrets(github_secret_dict)  # push the encrypted secrets to the forked GitHub repo
-
-            # store the GitHub forked repo URL into SSM parameter store
-            ssm.put_parameter(
-                Name="/craftform/config/github/repo",
-                Value=f"{github_username}/CraftForm",
-                Type="String",
-                Overwrite=True,
-            )
+            # NOTE: the /craftform/config/github/repo SSM param is now declared statically in home-region.yaml
 
             # =================================DISCORD INTEGRATION=============================
             # get the bot token secret
-            discord_bot_token = secrets_dict["Discord-Bot-Token"]  # get the bot token from Secret Manager
+            discord_bot_token = secrets["Discord-Bot-Token"]  # bot token from Secrets Manager
 
             # set up discord client
             discord_client = DiscordClient(discord_bot_token, discord_app_id)
