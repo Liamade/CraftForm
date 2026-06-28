@@ -37,8 +37,30 @@ def list_names_under(prefix):
 
     return names
 
+# =====================================GET A VARIABLE====================================
+def get_parameter(name):
+    return ssm.get_parameter(Name=name)["Parameter"]["Value"]
 
-# ===================================GET A JSON PARAM===================================
+# ====================================GET A JSON DICT====================================
 # a bunch of our params are json blobs
-def get_json(name):
+def get_dict(name):
+    # turns string blobs in the ssm parameter store into a json dictionary
     return json.loads(ssm.get_parameter(Name=name)["Parameter"]["Value"])
+
+
+# ============================GET THE DISCORD PUBLIC KEY (cached)============================
+# the discord public key never changes, so there's no point hitting ssm on every single
+# invocation. we fetch it ONCE per cold start and reuse it on every warm one after that :)
+# ------------------------------------------------------------------------------------------
+_discord_public_key = None  # starts empty -- nothing fetched yet
+
+
+def get_discord_public_key():
+    global _discord_public_key  # we wanna update the cache var above, not make a new local one
+
+    if _discord_public_key is None:  # first call on this container? go grab it + save it
+        _discord_public_key = get_parameter("/craftform/config/discord/public-key")
+
+    return _discord_public_key  # every call after just hands back the saved copy -- no ssm hit
+
+

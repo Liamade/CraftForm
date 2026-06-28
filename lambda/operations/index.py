@@ -14,7 +14,7 @@ import base64
 from nacl.signing import VerifyKey  # cryptographic library for verifying signatures
 
 from commands import server, template, region, update  # the actual command handlers
-from aws_clients import ssm  # shared boto3 clients -- made once per cold start
+from ssm_helpers import get_discord_public_key  # cached getter -- only hits ssm on cold start
 
 
 # ==========================================================================================
@@ -26,7 +26,7 @@ def handler(event, context):
 
     # ====================================VERIFY DISCORD SIGNATURE================================
     
-    discord_public_key = ssm.get_parameter(Name="/craftform/config/discord/public-key")["Parameter"]["Value"]  # get the Discord public key
+    discord_public_key = get_discord_public_key()  # cached -- only hits ssm on the first (cold start) call
 
     rawBody = event["body"]  # capture the raw body FIRST - api gateway can mess with it before we verify
 
