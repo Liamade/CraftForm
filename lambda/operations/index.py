@@ -14,7 +14,7 @@ import base64
 from nacl.signing import VerifyKey  # cryptographic library for verifying signatures
 
 from commands import server, template, region, update  # the actual command handlers
-from ssm_helpers import get_discord_public_key  # cached getter -- only hits ssm on cold start
+from services import ssm  # ssm helpers -- call as ssm.get_discord_public_key(), ssm.get_parameter(), etc.
 
 
 # ==========================================================================================
@@ -26,7 +26,7 @@ def handler(event, context):
 
     # ====================================VERIFY DISCORD SIGNATURE================================
     
-    discord_public_key = get_discord_public_key()  # cached -- only hits ssm on the first (cold start) call
+    discord_public_key = ssm.get_discord_public_key()  # cached -- only hits ssm on the first (cold start) call
 
     rawBody = event["body"]  # capture the raw body FIRST - api gateway can mess with it before we verify
 

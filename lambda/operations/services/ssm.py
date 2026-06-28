@@ -1,7 +1,7 @@
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║                               CraftForm                                      ║
 # ╠══════════════════════════════════════════════════════════════════════════════╣
-# ║  OPERATIONS LAMBDA  ::  ssm_helpers.py                                       ║
+# ║  OPERATIONS LAMBDA  ::  services/ssm.py                                      ║
 # ║  Little shared helpers for poking around the SSM parameter store.            ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -42,7 +42,6 @@ def get_parameter(name):
     return ssm.get_parameter(Name=name)["Parameter"]["Value"]
 
 # ====================================GET A JSON DICT====================================
-# a bunch of our params are json blobs
 def get_dict(name):
     # turns string blobs in the ssm parameter store into a json dictionary
     return json.loads(ssm.get_parameter(Name=name)["Parameter"]["Value"])
@@ -62,5 +61,3 @@ def get_discord_public_key():
         _discord_public_key = get_parameter("/craftform/config/discord/public-key")
 
     return _discord_public_key  # every call after just hands back the saved copy -- no ssm hit
-
-

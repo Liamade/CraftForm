@@ -8,8 +8,8 @@
 
 import urllib3
 import json
-from aws_clients import secrets, ssm, ec2
-from ssm_helpers import list_names_under  # shared ssm helpers
+from aws_clients import ec2  # raw client we still call directly (ssm + secrets now go through services/)
+from services import ssm, secrets  # service helpers -- ssm.get_parameter(), secrets.get_secret(), etc.
 
 # the prefix every deployed region's config lives under
 REGIONS_PREFIX = "/craftform/regions/"
@@ -45,7 +45,7 @@ def handle(subcommand, options, body):
     # ================================<CREATE>================================
     if subcommand == "create":
         # which regions are already deployed
-        active_regions = list_names_under(REGIONS_PREFIX)
+        active_regions = ssm.list_names_under(REGIONS_PREFIX)
 
         # the regions aws actually offers right now
         all_regions = {region["RegionName"] for region in ec2.describe_regions(AllRegions=True)["Regions"]}
@@ -69,7 +69,7 @@ def handle(subcommand, options, body):
     # ================================<DELETE>================================
     if subcommand == "delete":
         # which regions are already deployed
-        active_regions = list_names_under(REGIONS_PREFIX)
+        active_regions = ssm.list_names_under(REGIONS_PREFIX)
 
         # nothing deployed -- nothing to tear down
         if not active_regions:
@@ -86,7 +86,7 @@ def handle(subcommand, options, body):
     # =================================<LIST>=================================
     if subcommand == "list":
         # hand the fleet over to the embed builder and ship it
-        return region_atlas(list_names_under(REGIONS_PREFIX))
+        return region_atlas(ssm.list_names_under(REGIONS_PREFIX))
 
     # =================================<APPLY>=================================
     if subcommand.startswith("apply"):
@@ -97,16 +97,10 @@ def handle(subcommand, options, body):
         region = body["data"]["values"][0]
 
         # get the github pat from the secret manager
-        secret = secrets.get_secret_value(
-                SecretId="craftform-secrets"
-            )  # get the secret value for the secret named "craftform-secrets" from Secrets Manager
-            
-        secrets_dict = json.loads(secret["SecretString"])
-
-        github_pat = secrets_dict["Github-PAT"]
+        github_pat = secrets.get_secret("Github-PAT")
         
         # get the github repo
-        github_repo = ssm.get_parameter(Name="/craftform/config/github/repo")["Parameter"]["Value"]
+        github_repo = ssm.get_parameter("/craftform/config/github/repo")
 
 
         # trigger the github actions workflow
