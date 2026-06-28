@@ -16,31 +16,6 @@ from nacl.signing import VerifyKey  # cryptographic library for verifying signat
 from commands import server, template, region, update  # the actual command handlers
 from aws_clients import ssm  # shared boto3 clients -- made once per cold start
 
-# ==========================================================================================
-#                           SETUP CLIENTS AND GLOBAL VARIABLES
-# ==========================================================================================
-discord_public_key = ssm.get_parameter(Name="/craftform/config/discord/public-key")["Parameter"]["Value"]  # get the Discord public key
-
-
-# ==========================================================================================
-#                    VERIFY DISCORD SIGNATURE AND HANDLE INTERACTIONS
-# ==========================================================================================
-def verify_signature(event, rawBody, public_key):
-
-    signature = event["headers"]["x-signature-ed25519"]  # get the signature from the request headers
-    timestamp = event["headers"]["x-signature-timestamp"]  # get the timestamp from the request headers
-
-    try:
-        verify_key = VerifyKey(bytes.fromhex(public_key))  # convert the public key from hex to a PyNaCL VerifyKey object
-        verify_key.verify(
-            timestamp.encode() + rawBody.encode(), bytes.fromhex(signature)
-        )  # combine timestamp and body, then verify the signature against the public key
-
-    except Exception as e:  # catch any exceptions because discord sends a bad ping when first setting up the interactions endpoint
-        print("Error occurred while verifying signature:", str(e))
-        return False  # signature verification failed :(
-    return True
-
 
 # ==========================================================================================
 #                                 DISCORD API INTERACTIONS
@@ -50,6 +25,8 @@ def handler(event, context):
     print("Received event:", json.dumps(event))  # log the incoming event for debugging
 
     # ====================================VERIFY DISCORD SIGNATURE================================
+    
+    discord_public_key = ssm.get_parameter(Name="/craftform/config/discord/public-key")["Parameter"]["Value"]  # get the Discord public key
 
     rawBody = event["body"]  # capture the raw body FIRST - api gateway can mess with it before we verify
 
@@ -104,3 +81,25 @@ def handler(event, context):
 
         if command == "region":
             return region.handle(subcommand, [], body)
+
+
+
+# ==========================================================================================
+#                    VERIFY DISCORD SIGNATURE AND HANDLE INTERACTIONS
+# ==========================================================================================
+def verify_signature(event, rawBody, public_key):
+
+    signature = event["headers"]["x-signature-ed25519"]  # get the signature from the request headers
+    timestamp = event["headers"]["x-signature-timestamp"]  # get the timestamp from the request headers
+
+    try:
+        verify_key = VerifyKey(bytes.fromhex(public_key))  # convert the public key from hex to a PyNaCL VerifyKey object
+        verify_key.verify(
+            timestamp.encode() + rawBody.encode(), bytes.fromhex(signature)
+        )  # combine timestamp and body, then verify the signature against the public key
+
+    except Exception as e:  # catch any exceptions because discord sends a bad ping when first setting up the interactions endpoint
+        print("Error occurred while verifying signature:", str(e))
+        return False  # signature verification failed :(
+    return True
+
