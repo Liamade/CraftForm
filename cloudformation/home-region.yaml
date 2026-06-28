@@ -269,6 +269,14 @@ Resources:
                 Action: secretsmanager:GetSecretValue
                 Resource: !Sub arn:aws:secretsmanager:*:${AWS::AccountId}:secret:craftform-secrets-*
 
+              # ---- peek into per-region world buckets to check they're empty before a delete ----
+              # /region delete blocks teardown if the bucket still holds world data. ListBucket is
+              # on the BUCKET arn (not /*), scoped by name to the per-region world buckets.
+              - Sid: WorldBucketList
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:aws:s3:::craftform-*-${AWS::AccountId}
+
               # ---- /update fires the staging function off async to do the actual heavy lifting ----
               - Sid: InvokeStaging
                 Effect: Allow

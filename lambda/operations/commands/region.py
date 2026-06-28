@@ -8,9 +8,9 @@
 
 import urllib3
 import json
-from aws_clients import ec2  # raw client we still call directly (ssm + secrets now go through services/)
-from services import ssm, secrets  # service helpers -- ssm.get_parameter(), secrets.get_secret(), etc.
-import responses  # discord interaction-response builders -- responses.plain_message(), responses.drop_down(), etc.
+from aws_clients import ec2  # raw client we still call directly
+from services import ssm, secrets, s3  # service helpers
+import responses  # discord interaction-response builders
 
 # the prefix every deployed region's config lives under
 REGIONS_PREFIX = "/craftform/regions/"
@@ -92,6 +92,16 @@ def handle(subcommand, options, body):
 
         # capture the region
         region = body["data"]["values"][0]
+
+        # ---- guard: can't tear a region down while its world-data bucket still has objects ----
+        if action == "destroy":
+            bucket = ssm.get_dict(f"/craftform/regions/{region}/config")["bucket_name"]
+            if s3.bucket_has_objects(bucket):
+                return responses.plain_message(
+                    f"**{REGION_NAMES.get(region, region)}** still has world data stored in its S3 bucket "
+                    f"(`{bucket}`), so I can't tear the region down yet.\n\n"
+                    "Please delete the objects in that bucket first, then run `/region delete` again. :)"
+                )
 
         # get the github pat from the secret manager
         github_pat = secrets.get_secret("Github-PAT")

@@ -1,20 +1,22 @@
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║                               CraftForm                                      ║
 # ╠══════════════════════════════════════════════════════════════════════════════╣
-# ║  OPERATIONS LAMBDA  ::  aws_clients.py                                       ║
-# ║  One shared home for the boto3 clients used across the command handlers.     ║
+# ║  OPERATIONS LAMBDA  ::  services/s3.py                                       ║
+# ║  Little shared helpers for peeking at the per-region world-data buckets.     ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 # ==========================================================================================
-#                               SHARED AWS CLIENTS
+#                                   S3 HELPERS
 # ==========================================================================================
-# these live at module level on purpose -- lambda builds them ONCE per cold start and reuses
-# this way we don't have to rebuild the clients everytime to call them
+# every region has its own "craftform-<region>-<account>" bucket holding the world data.
+# we mostly just need to peek at these (e.g. "is it empty before we tear the region down?")
 # ------------------------------------------------------------------------------------------
-import boto3
+from aws_clients import s3  # shared client -- made once per cold start
 
-ssm           = boto3.client("ssm")             # parameter store -- config + per-region discovery
-secrets       = boto3.client("secretsmanager")  # the github PAT (for dispatching workflows)
-lambda_client = boto3.client("lambda")          # invoking other craftform functions (e.g. /update -> staging)
-ec2           = boto3.client("ec2")             # used for describe_regions to list all available AWS regions
-s3            = boto3.client("s3")              # peek into per-region world buckets (empty-check before delete)
+
+# =================================BUCKET HAS OBJECTS====================================
+# cheapest possible "is this bucket empty?" check -- ask for just a SINGLE key. if even one
+# comes back, there's data in there. we don't list the whole bucket, we just peek :)
+def bucket_has_objects(bucket):
+    response = s3.list_objects_v2(Bucket=bucket, MaxKeys=1)
+    return response.get("KeyCount", 0) > 0
