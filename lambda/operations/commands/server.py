@@ -15,6 +15,7 @@ from services import ssm
 def handle(subcommand, options, body):
 
     # which regions are already deployed
+    active_regions = ssm.list_names_under("/craftform/regions/")
 
     # ===============================<START>================================
     if subcommand == "start":

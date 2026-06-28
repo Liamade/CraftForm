@@ -9,6 +9,7 @@
 import json
 
 from aws_clients import lambda_client  # shared client -- no need to build our own
+import responses  # discord interaction-response builders -- responses.deferred(), etc.
 
 
 # ==========================================================================================
@@ -31,8 +32,4 @@ def handle(subcommand, options, body):
 
     # ===========================DISCORD RESPONSE===========================
     # tell discord we're thinking - staging lambda will edit this message when it's done :)
-    return {
-        "statusCode": 200,
-        "headers": {"Content-Type": "application/json"},
-        "body": json.dumps({"type": 5}),  # type 5 = deferred response = "thinking..." spinner
-    }
+    return responses.deferred()

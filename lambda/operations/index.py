@@ -15,6 +15,7 @@ from nacl.signing import VerifyKey  # cryptographic library for verifying signat
 
 from commands import server, template, region, update  # the actual command handlers
 from services import ssm  # ssm helpers -- call as ssm.get_discord_public_key(), ssm.get_parameter(), etc.
+import responses  # discord interaction-response builders -- responses.pong(), etc.
 
 
 # ==========================================================================================
@@ -51,10 +52,7 @@ def handler(event, context):
     # ====================================HANDLE PING================================
     # discord sends a ping when first setting up the interactions endpoint - just gotta say hi back :)
     if body["type"] == 1:
-        return {
-            "statusCode": 200,
-            "body": json.dumps({"type": 1}),  # type 1 = pong
-        }
+        return responses.pong()
 
     # ====================================ROUTE SLASH COMMANDS===================================
     if body["type"] == 2:

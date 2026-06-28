@@ -10,6 +10,7 @@ import urllib3
 import json
 from aws_clients import ec2  # raw client we still call directly (ssm + secrets now go through services/)
 from services import ssm, secrets  # service helpers -- ssm.get_parameter(), secrets.get_secret(), etc.
+import responses  # discord interaction-response builders -- responses.plain_message(), responses.drop_down(), etc.
 
 # the prefix every deployed region's config lives under
 REGIONS_PREFIX = "/craftform/regions/"
@@ -55,15 +56,13 @@ def handle(subcommand, options, body):
 
         # every supported region is already live -- nothing left to spin up
         if not available_regions:
-            return plain_message("Every supported region is already deployed — nothing left to create.")
+            return responses.plain_message("Every supported region is already deployed — nothing left to create.")
 
-        # build out the response packet
-        content = "Pick a region to deploy into:"
-        custom_id = "region:apply_create"
-        placeholder = "Choose a region..."
+        # build the dropdown options -- map each raw region code to its friendly label
+        options = [{"label": REGION_NAMES.get(r, r), "value": r} for r in sorted(available_regions)]
 
         # return the packet
-        return drop_down(content, custom_id, placeholder, available_regions)
+        return responses.drop_down("Pick a region to deploy into:", "region:apply_create", "Choose a region...", options)
 
 
     # ================================<DELETE>================================
@@ -73,15 +72,13 @@ def handle(subcommand, options, body):
 
         # nothing deployed -- nothing to tear down
         if not active_regions:
-            return plain_message("No regions are deployed yet — there's nothing to destroy.")
+            return responses.plain_message("No regions are deployed yet — there's nothing to destroy.")
 
-        # build out the response packet
-        content = "Pick a region to destroy:"
-        custom_id = "region:apply_destroy"
-        placeholder = "Choose a region..."
+        # build the dropdown options -- map each raw region code to its friendly label
+        options = [{"label": REGION_NAMES.get(r, r), "value": r} for r in sorted(active_regions)]
 
         # return the response packet
-        return drop_down(content, custom_id, placeholder, active_regions)
+        return responses.drop_down("Pick a region to destroy:", "region:apply_destroy", "Choose a region...", options)
 
     # =================================<LIST>=================================
     if subcommand == "list":
@@ -126,76 +123,10 @@ def handle(subcommand, options, body):
 
         # check and see if the http request went through
         if githubRequest.status != 204:
-            return {
-                "statusCode": 200,
-                "headers": {"Content-Type": "application/json"},
-                "body": json.dumps(
-                    {
-                        "type": 4,  # respond immediately to the user
-                        "data": {
-                            "content": "Github Connection failed :(",
-                            "flags": 64  # only visible to the user who ran the command
-                        },
-                    }
-                ),
-            }
+            return responses.plain_message("Github Connection failed :(")
 
         # tell discord we're thinking - terraform workflow will tell discord what happened :)
-        return {
-            "statusCode": 200,
-            "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"type": 5}),  # type 5 = deferred response = "thinking..." spinner
-        }
-
-# ==========================================================================================
-#                                 DROP DOWN RESPONSE
-# ==========================================================================================
-def drop_down (content, custom_id, placeholder, options):
-    return {
-            "statusCode": 200,
-            "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({
-                "type": 4,
-                "data": {
-                    "content": content,
-                    "flags": 64,  # only visible to the user who ran the command
-                    "components": [
-                        {
-                            "type": 1,  # type 1 = action row (container for components)
-                            "components": [
-                                {
-                                    "type": 3,  # string select menu
-                                    "custom_id": custom_id,
-                                    "placeholder": placeholder,
-                                    "options": [
-                                        # label = friendly name the user sees, value = raw aws code we act on
-                                        {"label": REGION_NAMES.get(r, r), "value": r}
-                                        for r in sorted(options)
-                                    ]
-                                }
-                            ]
-                        }
-                    ]
-                }
-            })
-        }
-
-# ==========================================================================================
-#                                 PLAIN MESSAGE RESPONSE
-# ==========================================================================================
-def plain_message(text):
-    # a simple ephemeral text reply -- used when there's nothing to show in a menu
-    return {
-        "statusCode": 200,
-        "headers": {"Content-Type": "application/json"},
-        "body": json.dumps({
-            "type": 4,
-            "data": {
-                "content": text,
-                "flags": 64,  # only visible to the user who ran the command
-            }
-        })
-    }
+        return responses.deferred()
 
 # ==========================================================================================
 #                                 REGION ATLAS (LIST)
