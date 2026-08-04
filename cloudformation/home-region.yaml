@@ -8,7 +8,7 @@
 
 AWSTemplateFormatVersion: '2010-09-09'
 Description: |
-  Develops and provisions the CraftForm home region (home base) that all infrastructure and resources are deployed/managed from. This also  sets up the connections and integrations with Discord and Github, as well as the Github Actions CI/CD pipeline.
+  Develops and provisions the CraftForm home region (home base) that all infrastructure and resources are deployed/managed from. This also sets up the connection and integration with Discord, as well as the CodeBuild project that runs Terraform for region deploys.
 
 #====================================================================================================================
 #                                                 PARAMETERS
@@ -36,77 +36,45 @@ Parameters:
     Description: The Discord Bot Token for authenticating the CraftForm bot with Discord.
     NoEcho: true # Hide the value in the CloudFormation console for security
 
-  # Github parameters for the GitHub integration and cloning from the GitHub repository
-  GitHubPersonalAccessToken:
-    Type: String
-    Description: The GitHub Personal Access Token for authenticating with GitHub APIs.
-    NoEcho: true # Hide the value in the CloudFormation console for security
-  GitHubUsername:
-    Type: String
-    Description: The GitHub Username associated with the Personal Access Token.
-
 #====================================================================================================================
 #                                                 RESOURCES
 #====================================================================================================================
-# set of necessary resources for the home region setup - develops the home region for discord and github integration, 
+# set of necessary resources for the home region setup - develops the home region for the discord integration,
 # and the necessary infrastructure for the CraftForm bot to operate in the home region
 #--------------------------------------------------------------------------------------------------------------------
 
 Resources:
 
-# -----------------------------------------OIDC PROVIDER-----------------------------------------
-  # OIDC PROVIDER - allows GitHub Actions to authenticate with AWS using OIDC tokens rather than secret access keys, which is more secure and eliminates the need to manage long-lived credentials for GitHub Actions in AWS. This OIDC provider will be used in the trust policy of the IAM role that GitHub Actions will assume when deploying to the home region.
-  GithubOIDCProvider:
-    Type: AWS::IAM::OIDCProvider
-    Properties:
-      Url: https://token.actions.githubusercontent.com # OIDC provider URL for GitHub Actions
-      ClientIdList:
-        # basically where GitHub Actions will be allowed to authenticate from
-        - sts.amazonaws.com
-      ThumbprintList:
-        # Thumbprint for token.actions.githubusercontent.com
-        - 6938fd4d98bab03faadb97b34396831e3780aea1
-        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
-
-  # ------------------------------------------IAM ROLES------------------------------------------
-  # GITHUB ACTIONS ROLE -- the IAM role that GitHub Actions will assume
-  GithubActionsRole:
+# ------------------------------------------IAM ROLES------------------------------------------
+  # TERRAFORM BUILD ROLE -- the role the CodeBuild project runs terraform under.
+  # this is the exact same permission set the old github actions role carried, just handed to
+  # codebuild instead -- no OIDC provider, no federation, no long-lived keys anywhere :)
+  CodeBuildTerraformRole:
     Type: AWS::IAM::Role
     Properties:
-      # configs for the IAM role that GitHub Actions will assume
       # tags
       Tags:
         - Key: Project
           Value: craftform
         - Key: Environment
           Value: HomeRegion
-      RoleName: craftform-github-actions # Name of the IAM role for GitHub Actions
+      RoleName: craftform-terraform-build # Name of the IAM role the terraform builds run as
       AssumeRolePolicyDocument:
-        # who is allowed to assume this role - GithubActions
+        # who is allowed to assume this role - the CodeBuild service
         Version: '2012-10-17'
         Statement:
-          # list of statements in the trust policy
           - Effect: Allow
             Principal:
-              # who is allowed to assume this role
-              # reference the created OIDC provider for Github Actions - Get the ARN (can't use !Ref here)
-              Federated: !GetAtt GithubOIDCProvider.Arn
-
-            # allow assuming the role with web identity (OIDC token)
-            Action: sts:AssumeRoleWithWebIdentity
-
+              Service: codebuild.amazonaws.com # only codebuild can assume this
+            Action: sts:AssumeRole
             Condition:
-              # conditions for assuming the role
+              # confused-deputy guard -- codebuild can only assume this on behalf of THIS account
               StringEquals:
-                # only accept token with this audience claim - that the token is meant for AWS STS
-                token.actions.githubusercontent.com:aud: sts.amazonaws.com
-              StringLike:
-                # only accept tokens from this specific repo/user - where the token is coming from
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubUsername}/CraftForm:*
+                aws:SourceAccount: !Ref AWS::AccountId
 
       Policies:
         # inline policies for the role - permissions that the role has
-        - PolicyName: craftform-github-actions-policy
+        - PolicyName: craftform-terraform-build-policy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -215,6 +183,17 @@ Resources:
                 Action: s3:DeleteBucket
                 Resource: !Sub arn:aws:s3:::craftform-home-${AWS::AccountId}
 
+              # ======================= build logs =======================
+              # github used to keep the logs for us -- now the build writes its own terraform
+              # output into cloudwatch, which is the only place to go digging when a run fails
+              - Sid: BuildLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/codebuild/craftform-*:*
+
   # LAMBDA OPERATION ROLE - the IAM role that the Lambda function will assume
   LambdaOperationRole:
     Type: AWS::IAM::Role
@@ -263,11 +242,19 @@ Resources:
                   - !Sub arn:aws:ssm:*:${AWS::AccountId}:parameter/craftform/templates/*
                   - !Sub arn:aws:ssm:*:${AWS::AccountId}:parameter/craftform/regions/*
 
-              # ---- the GitHub PAT + Discord token, for dispatch + signature work ----
+              # ---- the Discord bot token, for signature work ----
               - Sid: SecretsRead
                 Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource: !Sub arn:aws:secretsmanager:*:${AWS::AccountId}:secret:craftform-secrets-*
+
+              # ---- /region create + delete kick off the terraform build ----
+              # arn is written out by hand instead of !GetAtt so this role doesn't depend on the
+              # project resource -- just make sure the project is named craftform-terraform
+              - Sid: StartTerraformBuild
+                Effect: Allow
+                Action: codebuild:StartBuild
+                Resource: !Sub arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/craftform-terraform
 
               # ---- peek into per-region world buckets to check they're empty before a delete ----
               # /region delete blocks teardown if the bucket still holds world data. ListBucket is
@@ -423,8 +410,7 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # the github/repo param is now declared statically in the template, so this role
-              # no longer needs any SSM access -- it just reads the secrets bundle and logs
+              # this role has no SSM access on purpose -- it just reads the secrets bundle and logs
               - Sid: SecretsRead
                 Effect: Allow
                 Action: secretsmanager:GetSecretValue
@@ -474,10 +460,6 @@ Resources:
                 Resource:
                   - !GetAtt CraftFormHomeBucket.Arn
                   - !Sub "${CraftFormHomeBucket.Arn}/*"
-                # /update needs the github PAT to sync the user's fork
-              - Effect: Allow
-                Action: secretsmanager:GetSecretValue
-                Resource: !Sub "arn:aws:secretsmanager:*:${AWS::AccountId}:secret:craftform-secrets-*"
                 # /update redeploys both functions and pokes startup to re-register the commands
               - Effect: Allow
                 Action: [lambda:UpdateFunctionCode, lambda:GetFunction, lambda:InvokeFunction]
@@ -514,23 +496,21 @@ Resources:
         RestrictPublicBuckets: true # say no no to any public access to the bucket
 
   # -------------------------------------------SECRET MANGER-------------------------------------------
-  # holds sensitive information like the Discord bot token and Github PAT, which are needed for the
+  # holds sensitive information like the Discord bot token, which is needed for the
   # craftForm bot to operate
 
   CraftFormSecrets:
     Type: AWS::SecretsManager::Secret
     Properties:
       Name: craftform-secrets
-      Description: Secrets for CraftForm application, including Discord and GitHub
-        credentials.
+      Description: Secrets for CraftForm application, including Discord credentials.
       Tags:
         - Key: Project
           Value: craftform
         - Key: Environment
           Value: HomeRegion
 
-      SecretString: !Sub '{"Discord-Bot-Token": "${DiscordBotToken}", "Github-PAT":
-        "${GitHubPersonalAccessToken}"}'
+      SecretString: !Sub '{"Discord-Bot-Token": "${DiscordBotToken}"}'
 
   # -------------------------------------------SSM PARAMETERS------------------------------------------
   # HOME REGION PARAMETER
@@ -541,30 +521,6 @@ Resources:
       Type: String
       Value: !Sub ${AWS::Region} # set the value of the home region parameter
       Description: Home AWS region for CraftForm
-      Tags:
-        Project: craftform
-        Environment: HomeRegion
-
-  # GITHUB PARAMETERS:
-  GithubUsernameParameter:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: /craftform/config/github/username
-      Type: String
-      Value: !Ref GitHubUsername
-      Description: GitHub username for CraftForm integration
-      Tags:
-        Project: craftform
-        Environment: HomeRegion
-
-  # the user's fork, in owner/repo form -- formerly written by the startup function at runtime
-  GithubRepoParameter:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: /craftform/config/github/repo
-      Type: String
-      Value: !Sub ${GitHubUsername}/CraftForm
-      Description: The user's CraftForm fork (owner/repo) for CraftForm integration
       Tags:
         Project: craftform
         Environment: HomeRegion
@@ -612,19 +568,6 @@ Resources:
       Type: String
       Value: !Sub https://${DiscordApiGateway}.execute-api.${AWS::Region}.amazonaws.com/discord # construct the API Gateway endpoint URL using the API ID and region
       Description: API Gateway endpoint URL for CraftForm bot interactions
-      Tags:
-        Project: craftform
-        Environment: HomeRegion
-
-  # IAM ROLE PARAMETERS:  
-  GithubActionsRoleArnParameter:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: /craftform/config/iam/github-actions-role-arn
-      Type: String
-      Value: !GetAtt GithubActionsRole.Arn # get the ARN of the GitHub Actions role
-      Description: ARN of the IAM role for GitHub Actions to assume when deploying to
-        the home region
       Tags:
         Project: craftform
         Environment: HomeRegion
@@ -703,11 +646,10 @@ Resources:
       Timeout: 60
       MemorySize: 256 # give it a bit more memory for faster staging
       Role: !GetAtt StagerRole.Arn
-      # the /update path needs to know where to stash zips and whose fork to sync
+      # the /update path needs to know where to stash the zips
       Environment:
         Variables:
           Bucket: !Ref CraftFormHomeBucket
-          GithubUsername: !Ref GitHubUsername
       Code:
         ZipFile: |
           # ==================IMPORTS=================
@@ -717,8 +659,9 @@ Resources:
           # ================AWS CLIENT================
           s3 = boto3.client('s3')  # used by stage_assets, which BOTH the /update and cloudformation paths call - so it stays global
 
-          # the two functions we redeploy and the release assets that back them
-          assets = ['startup.zip', 'operations.zip']
+          # the release assets we stage -- the two lambda zips, plus the terraform source
+          # that the codebuild project pulls down at the start of every region run
+          assets = ['startup.zip', 'operations.zip', 'terraform.zip']
           base = "https://github.com/Liamade/CraftForm/releases"
 
           # ================CODE STAGING FUNCTION================
@@ -758,11 +701,10 @@ Resources:
             urllib.request.urlopen(req)
 
           # ================UPDATE FUNCTION================
-          # the /update flow: sync the fork, redeploy the lambdas, refresh commands, then tell discord we're done
+          # the /update flow: restage the assets, redeploy the lambdas, refresh commands, then tell discord we're done
           def handle_update(event):
             # -------------------------------AWS CLIENTS------------------------------
             lambdaClient = boto3.client('lambda')
-            secretsManager = boto3.client('secretsmanager')
             # ---------------------------INJECTED VARIABLES---------------------------
             app_id = event['application_id']  # so we can edit the user's "thinking..." message
             token = event['interaction_token']  # the token for THIS interaction
@@ -771,22 +713,10 @@ Resources:
             try:
               # VARIABLES -- stay as os variables after the first run so we can call them again
               bucket = os.environ['Bucket']  # the home craftform bucket
-              github_user = os.environ['GithubUsername']  # whose fork we're syncing
 
-              # grab the github PAT so we can sync the fork
-              secrets = json.loads(secretsManager.get_secret_value(SecretId="craftform-secrets")['SecretString'])
-              github_pat = secrets['Github-PAT']
-
-              # -------------------------------SYNC REPO-------------------------------
-              merge = urllib.request.Request(
-                f"https://api.github.com/repos/{github_user}/CraftForm/merge-upstream",
-                data=json.dumps({"branch": "main"}).encode(),
-                headers={"Authorization": f"token {github_pat}", "Accept": "application/vnd.github.v3+json", "Content-Type": "application/json"},
-                method="POST",
-              )
-              urllib.request.urlopen(merge)  # 200 = synced, anything else raises and we report it below
-
-              # ---------------------------LATEST LAMBDA CODE---------------------------
+              # ---------------------------LATEST RELEASE CODE---------------------------
+              # pulls all three assets -- both lambda zips AND the terraform source, so a
+              # region deploy after an /update runs the new terraform too :)
               stage_assets(bucket, 'latest') # calls the original stage_assets function with just the latest
 
               # UPDATE THE LAMBDA -- update the current lambdas with the new code that got pulled
@@ -853,7 +783,7 @@ Resources:
     Properties:
       FunctionName: craftform-startup-function
       Description: Lambda function to perform startup tasks for CraftForm, such as
-        forking craftForm repo, and registering commands to discord
+        registering commands to discord
       Tags:
         - Key: Project
           Value: craftform
@@ -863,14 +793,12 @@ Resources:
       # Variables
       Environment:
         Variables:
-          GithubUsername: !Ref GitHubUsername
           ApiGatewayUrl: !Sub https://${DiscordApiGateway}.execute-api.${AWS::Region}.amazonaws.com/discord
-          GithubActionsRoleArn: !GetAtt GithubActionsRole.Arn
           DiscordAppId: !Ref DiscordAppId
           Region: !Ref AWS::Region
           HomeBucket: !Ref CraftFormHomeBucket
-          # NOTE: the Discord bot token + GitHub PAT are NOT injected here on purpose -- the
-          # function fetches them from Secrets Manager at runtime so they never appear in the config
+          # NOTE: the Discord bot token is NOT injected here on purpose -- the function
+          # fetches it from Secrets Manager at runtime so it never appears in the config
 
       Timeout: 120 # set a longer timeout for the startup function
       Runtime: python3.12 # runtime for the Lambda function
