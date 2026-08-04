@@ -3,7 +3,7 @@
 # ╠══════════════════════════════════════════════════════════════════════════════╣
 # ║  STARTUP LAMBDA  ::  index.py                                                ║
 # ║  Entry point for the CloudFormation Custom Resource startup function.        ║
-# ║  Orchestrates GitHub and Discord setup on first deployment.                  ║
+# ║  Orchestrates the Discord setup on first deployment.                         ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
@@ -15,14 +15,13 @@ import json
 import boto3
 import os  # for accessing environment variables injected into the Lambda
 from discord_api import DiscordClient # import the discord client class from discord_api
-from github_api import GithubClient # import the class from github_api
 
 # ==========================================================================================
 #                            SECRETS
 # ==========================================================================================
 # client lives at module scope so warm invocations reuse the same connection (AWS best practice).
-# the secrets (Discord bot token + GitHub PAT) are fetched at runtime and never stored in the
-# function's env vars, so they don't show up in the Lambda config.
+# the Discord bot token is fetched at runtime and never stored in the function's env vars,
+# so it doesn't show up in the Lambda config.
 secrets_manager = boto3.client("secretsmanager")
 
 
@@ -74,38 +73,11 @@ def handler(event, context):
             # ===============================INJECTED VARIABLES===============================
 
             aws_api_url = os.environ["ApiGatewayUrl"]
-            github_username = os.environ["GithubUsername"]
             discord_app_id = os.environ["DiscordAppId"]
-
-            # build a dictionary of the variables being passed into github
-            github_var_dict = {
-                "HOME_REGION": os.environ["Region"],
-                "STATE_BUCKET": os.environ["HomeBucket"],
-            }
-            github_secret_dict = {
-                "AWS_ROLE_ARN": os.environ["GithubActionsRoleArn"]
-            }
-
-            # pull the secrets bundle once; reused by both the GitHub and Discord integrations below
-            secrets = get_secrets()
-
-            # ================================GITHUB INTEGRATION===============================
-            github_pat = secrets["Github-PAT"]  # GitHub Personal Access Token from Secrets Manager
-
-            github_client = GithubClient(github_pat, github_username)
-
-            github_client.fork_repo()  # fork the CraftForm repo into the user's GitHub account and wait for the fork to be ready
-
-            github_client.enable_actions()  # enable GitHub Actions in the forked repo
-
-            github_client.push_variables(github_var_dict)  # push all the repo variables :)
-
-            github_client.push_secrets(github_secret_dict)  # push the encrypted secrets to the forked GitHub repo
-            # NOTE: the /craftform/config/github/repo SSM param is now declared statically in home-region.yaml
 
             # =================================DISCORD INTEGRATION=============================
             # get the bot token secret
-            discord_bot_token = secrets["Discord-Bot-Token"]  # bot token from Secrets Manager
+            discord_bot_token = get_secrets()["Discord-Bot-Token"]  # bot token from Secrets Manager
 
             # set up discord client
             discord_client = DiscordClient(discord_bot_token, discord_app_id)

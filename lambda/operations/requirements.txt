@@ -2,5 +2,5 @@
 #                          DEPENDENCIES
 #=====================================================================
 
-PyNaCl>=1.6.2 # for encryption and decryption of secrets
+PyNaCl>=1.6.2 # for verifying the ed25519 signature discord signs every interaction with
 urllib3

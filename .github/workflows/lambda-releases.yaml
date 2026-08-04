@@ -89,6 +89,17 @@ jobs:
 
           done
 
+      # BUILD TERRAFORM SOURCE: the codebuild project pulls this down and runs it on every
+      # /region create or delete -- it's the payload that used to be an actions/checkout
+      - name: Build Terraform Source
+        run: |
+          # zip from INSIDE the dir so main.tf sits at the root of the zip, same shape as the
+          # lambda zips. the .terraform.lock.hcl rides along on purpose -- it pins the providers
+          (
+            cd terraform
+            zip -r ../terraform.zip . -x '.terraform/*' '*.tfstate*'
+          )
+
       # CREATE GITHUB RELEASE: create a new release in GitHub using the version number from the workflow input
       - name: Publish Release
         id: release  # capture the output of this step to get the release ID
@@ -103,4 +114,5 @@ jobs:
           files: |
             startup.zip
             operations.zip
+            terraform.zip
   

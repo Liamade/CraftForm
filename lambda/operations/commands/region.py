@@ -6,14 +6,17 @@
 # ║  Create, delete, and list regions.                                           ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
-import urllib3
 import json
-from aws_clients import ec2  # raw client we still call directly
-from services import ssm, secrets, s3  # service helpers
+from aws_clients import ec2, codebuild  # raw clients we still call directly
+from services import ssm, s3  # service helpers
 import responses  # discord interaction-response builders
 
 # the prefix every deployed region's config lives under
 REGIONS_PREFIX = "/craftform/regions/"
+
+# the codebuild project that actually runs terraform -- this replaced the old github actions
+# workflow. the name is hardcoded in the operations lambda's IAM policy too, so they have to match
+TERRAFORM_PROJECT = "craftform-terraform"
 
 # the regions CraftForm is willing to deploy into 
 REGION_NAMES = {
@@ -103,39 +106,24 @@ def handle(subcommand, options, body):
                     "Please delete the objects in that bucket first, then run `/region delete` again. :)"
                 )
 
-        # get the github pat from the secret manager
-        github_pat = secrets.get_secret("Github-PAT")
-        
-        # get the github repo
-        github_repo = ssm.get_parameter("/craftform/config/github/repo")
+        # kick off the terraform build. the region + action tell it WHAT to do, and the
+        # discord pair lets the build edit this exact "thinking..." message when it finishes.
+        # fire-and-forget on purpose -- we've got 3 seconds to answer discord, the build takes minutes
+        try:
+            codebuild.start_build(
+                projectName=TERRAFORM_PROJECT,
+                environmentVariablesOverride=[
+                    {"name": "REGION", "value": region},
+                    {"name": "ACTION", "value": action},
+                    {"name": "APPLICATION_ID", "value": body["application_id"]},
+                    {"name": "INTERACTION_TOKEN", "value": body["token"]},
+                ],
+            )
+        except Exception as e:
+            print(f"Failed to start the terraform build: {e} :(")
+            return responses.plain_message("Couldn't kick off the terraform build :(")
 
-
-        # trigger the github actions workflow
-        http = urllib3.PoolManager()
-        githubRequest = http.request(
-            "POST",
-            f"https://api.github.com/repos/{github_repo}/actions/workflows/tf-deploy-region.yaml/dispatches",
-            body=json.dumps({
-                "ref": "main",
-                "inputs": {
-                    "region": region,
-                    "action": action,
-                    "application_id": body["application_id"],
-                    "interaction_token": body["token"]
-                }
-            }).encode(),
-            headers={
-                "Authorization": f"Bearer {github_pat}",
-                "Content-Type": "application/json",
-                "Accept": "application/vnd.github+json"
-            }
-        )
-
-        # check and see if the http request went through
-        if githubRequest.status != 204:
-            return responses.plain_message("Github Connection failed :(")
-
-        # tell discord we're thinking - terraform workflow will tell discord what happened :)
+        # tell discord we're thinking - the build will tell discord what happened :)
         return responses.deferred()
 
 # ==========================================================================================
