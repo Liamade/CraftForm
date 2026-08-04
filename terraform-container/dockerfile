@@ -21,9 +21,9 @@ RUN  \
     # install unzip tool
     dnf install -y unzip \
     # download teh terraform zip to tmp
-    && curl -fsSl -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" \
+    && curl -fsSL -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" \
     # install the checksums to make sure the zip is valid
-    && curl -fsSl -o /tmp/terraform_SHA256SUMS "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_SHA256SUMS" \
+    && curl -fsSL -o /tmp/terraform_SHA256SUMS "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_SHA256SUMS" \
     # verify the checksum of the downloaded zip file
     && grep "terraform_${TERRAFORM_VERSION}_linux_amd64.zip" /tmp/terraform_SHA256SUMS | sha256sum -c - \
     # unzip the terraform binary
@@ -32,15 +32,21 @@ RUN  \
     && chmod +x /usr/local/bin/terraform \
     # delete the zip and checksum files to keep image light
     && rm -rf /tmp/terraform.zip /tmp/terraform_SHA256SUMS
+
+
 # copies the terraform source code to the container
 COPY terraform/ ${LAMBDA_TASK_ROOT}/terraform/
 
 # set an env variable to say "cache terraform providers in this directory" -- so terraform doesn't have to download it each time
 ENV TF_PLUGIN_CACHE_DIR=${LAMBDA_TASK_ROOT}/terraform/.terraform.d/plugin-cache
+
+
 # creates the cache directory and runs terraform init to download the providers
 RUN mkdir -p "${TF_PLUGIN_CACHE_DIR}" \
     && cd "${LAMBDA_TASK_ROOT}/terraform" \
     && terraform init -backend=false -input=false
+
+
 # copy the python entrypoint handler in the container
 COPY terraform-container/handler.py ${LAMBDA_TASK_ROOT}/handler.py
 
