@@ -1,0 +1,96 @@
+#╔══════════════════════════════════════════════════════════════════════════════╗
+#║                               CraftForm                                      ║
+#╠══════════════════════════════════════════════════════════════════════════════╣
+#║  CODEBUILD  ::  buildspec.yml                                                ║
+#║  Runs terraform to create or destroy a region, then reports back to discord. ║
+#║  This replaced the old tf-deploy-region.yaml github actions workflow.        ║
+#║                                                                              ║
+#║  Rides at the ROOT of terraform.zip so it versions together with the         ║
+#║  terraform it runs -- codebuild picks it up automatically from the S3 source.║
+#║                                                                              ║
+#║  INJECTED BY THE OPERATIONS LAMBDA (per build):                              ║
+#║    REGION | ACTION | APPLICATION_ID | INTERACTION_TOKEN                      ║
+#║  SET ON THE PROJECT (never change):                                          ║
+#║    STATE_BUCKET | HOME_REGION                                                ║
+#╚══════════════════════════════════════════════════════════════════════════════╝
+
+version: 0.2
+
+env:
+  variables:
+    # terraform version -- bump here, it's the only place it's written down
+    TF_VERSION: "1.11.4"
+    # tells terraform it's running unattended, so it never tries to prompt us
+    TF_IN_AUTOMATION: "1"
+
+phases:
+
+  # ==========================================================================
+  #                          INSTALL TERRAFORM
+  # ==========================================================================
+  # the runner image doesn't ship terraform, so we grab the binary ourselves.
+  # this is the bit github's setup-terraform action used to do for us
+  install:
+    commands:
+      # download the zip AND the checksums hashicorp published next to it
+      - curl -fsSL -o /tmp/tf.zip "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+      - curl -fsSL -o /tmp/tf_SHA256SUMS "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_SHA256SUMS"
+      # make sure the zip we got is the zip they actually published
+      - grep "terraform_${TF_VERSION}_linux_amd64.zip" /tmp/tf_SHA256SUMS | sha256sum -c -
+      # drop the binary somewhere already on PATH
+      - unzip -oq /tmp/tf.zip -d /usr/local/bin && chmod +x /usr/local/bin/terraform
+      - terraform version
+
+  # ==========================================================================
+  #                            RUN TERRAFORM
+  # ==========================================================================
+  # codebuild already downloaded + unzipped terraform.zip for us and dropped us
+  # inside it, so main.tf is right here -- no checkout, no cd needed :)
+  #
+  # HEADS UP: each command below gets its own shell, so `cd` and `export` do NOT
+  # carry over between them. anything that needs to share state lives in one
+  # `- |` block. the filesystem persists fine, which is how tfplan survives
+  build:
+    commands:
+
+      # ---------------------------------INIT---------------------------------
+      # bucket = state storage | key = per-region object path | region = where the bucket lives
+      - |
+        terraform init -input=false -no-color -lock-timeout=60s \
+          -backend-config="bucket=${STATE_BUCKET}" \
+          -backend-config="key=regions/${REGION}/terraform.tfstate" \
+          -backend-config="region=${HOME_REGION}"
+
+      # ---------------------------------PLAN---------------------------------
+      # vars are passed explicitly instead of via TF_VAR_* since exports don't survive
+      - |
+        FLAG=''     # simple flag based on if the run is a destroy or a create
+        if [ "$ACTION" = "destroy" ]; then FLAG='-destroy'; fi
+        terraform plan $FLAG -out=tfplan -input=false -no-color \
+          -var="region=${REGION}" \
+          -var="home_region=${HOME_REGION}"
+
+      # ---------------------------------APPLY--------------------------------
+      # applying the saved plan, so the vars are already baked in
+      - terraform apply -input=false -no-color tfplan
+
+  # ==========================================================================
+  #                      TELL DISCORD WHAT HAPPENED
+  # ==========================================================================
+  # post_build runs even if the build FAILED -- that's exactly when we need to
+  # report. the user is still staring at the "thinking..." spinner either way
+  post_build:
+    commands:
+      - |
+        # CODEBUILD_BUILD_SUCCEEDING is 1 while everything's still fine, 0 once something broke
+        if [ "$CODEBUILD_BUILD_SUCCEEDING" = "1" ]; then
+          MESSAGE="Region \`$REGION\` was ${ACTION}d successfully. :)"
+        else
+          MESSAGE="Something went wrong while trying to $ACTION region \`$REGION\`. Check the build logs. :("
+        fi
+
+        # the @original endpoint edits the deferred "thinking..." message we left the user on
+        curl -sS -X PATCH \
+          "https://discord.com/api/v10/webhooks/${APPLICATION_ID}/${INTERACTION_TOKEN}/messages/@original" \
+          -H "Content-Type: application/json" \
+          -d "$(jq -n --arg content "$MESSAGE" '{content: $content}')"

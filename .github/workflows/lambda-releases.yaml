@@ -100,6 +100,13 @@ jobs:
             zip -r ../terraform.zip . -x '.terraform/*' '*.tfstate*'
           )
 
+          # the buildspec has to sit at the ROOT of the zip -- that's the only place codebuild
+          # looks for it. -j drops the path so it lands next to main.tf instead of in a subdir
+          zip -j terraform.zip buildspec.yml
+
+          # sanity check -- if buildspec.yml isn't in there the whole region deploy is dead
+          unzip -l terraform.zip | grep -q 'buildspec.yml' || { echo "buildspec.yml missing from terraform.zip :("; exit 1; }
+
       # CREATE GITHUB RELEASE: create a new release in GitHub using the version number from the workflow input
       - name: Publish Release
         id: release  # capture the output of this step to get the release ID
