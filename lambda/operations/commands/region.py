@@ -108,15 +108,16 @@ def handle(subcommand, options, body):
 
         # kick off the terraform build. the region + action tell it WHAT to do, and the
         # discord pair lets the build edit this exact "thinking..." message when it finishes.
-        # fire-and-forget on purpose -- we've got 3 seconds to answer discord, the build takes minutes
+        # fire-and-forget on purpose -- we've got 3 seconds to answer discord, the build takes minutes.
+        # these names have to line up with what buildspec.yml reads, so don't rename one alone :)
         try:
             codebuild.start_build(
                 projectName=TERRAFORM_PROJECT,
                 environmentVariablesOverride=[
-                    {"name": "REGION", "value": region},
-                    {"name": "ACTION", "value": action},
-                    {"name": "APPLICATION_ID", "value": body["application_id"]},
-                    {"name": "INTERACTION_TOKEN", "value": body["token"]},
+                    {"name": "DEPLOY_REGION", "value": region},                   # the region we're building INTO
+                    {"name": "TF_ACTION", "value": action},                       # create or destroy
+                    {"name": "DISCORD_APP_ID", "value": body["application_id"]},
+                    {"name": "DISCORD_TOKEN", "value": body["token"]},            # interaction token, NOT the bot token
                 ],
             )
         except Exception as e:
