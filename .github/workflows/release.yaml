@@ -103,13 +103,15 @@ jobs:
             zip -r ../terraform.zip . -x '.terraform/*' '*.tfstate*'
           )
 
-          # BUILDSPEC -- has to sit at the ROOT of the zip, it's the only place codebuild looks.
-          # -j drops the path so it lands next to main.tf instead of in a subdir
-          zip -j terraform.zip buildspec.yml
+          # BUILDSPEC -- has to sit at the ROOT of the zip, that's where codebuild reads it from.
+          # -j drops the path so it lands next to main.tf instead of in a subdir.
+          # NOTE: codebuild only auto-finds "buildspec.yml", so since ours is .yaml to match the
+          # rest of the repo, the project has to name it explicitly -> BuildSpec: buildspec.yaml
+          zip -j terraform.zip buildspec.yaml
 
           # SANITY CHECK -- if the buildspec didn't make it in, every region deploy is dead, so
           # break the release here instead of letting a user find out weeks later :(
-          unzip -l terraform.zip | grep -q 'buildspec.yml' || { echo "buildspec.yml missing from terraform.zip :("; exit 1; }
+          unzip -l terraform.zip | grep -q 'buildspec.yaml' || { echo "buildspec.yaml missing from terraform.zip :("; exit 1; }
 
       # CREATE GITHUB RELEASE: create a new release in GitHub using the version number from the workflow input
       - name: Publish Release

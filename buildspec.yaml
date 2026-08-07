@@ -1,12 +1,13 @@
 #╔══════════════════════════════════════════════════════════════════════════════╗
 #║                               CraftForm                                      ║
 #╠══════════════════════════════════════════════════════════════════════════════╣
-#║  CODEBUILD  ::  buildspec.yml                                                ║
+#║  CODEBUILD  ::  buildspec.yaml                                               ║
 #║  Runs Terraform to create or destroy a region, then reports to Discord.      ║
 #║  This is what replaced the old tf-deploy-region.yaml workflow.               ║
 #║                                                                              ║
 #║  Rides at the ROOT of terraform.zip so it always versions together with the  ║
-#║  terraform it runs -- codebuild finds it there on its own.                   ║
+#║  terraform it runs. Codebuild only auto-finds "buildspec.yml", so the        ║
+#║  project has to point at this one by name -> BuildSpec: buildspec.yaml       ║
 #╚══════════════════════════════════════════════════════════════════════════════╝
 
 version: 0.2

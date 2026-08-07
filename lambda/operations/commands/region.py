@@ -109,7 +109,7 @@ def handle(subcommand, options, body):
         # kick off the terraform build. the region + action tell it WHAT to do, and the
         # discord pair lets the build edit this exact "thinking..." message when it finishes.
         # fire-and-forget on purpose -- we've got 3 seconds to answer discord, the build takes minutes.
-        # these names have to line up with what buildspec.yml reads, so don't rename one alone :)
+        # these names have to line up with what buildspec.yaml reads, so don't rename one alone :)
         try:
             codebuild.start_build(
                 projectName=TERRAFORM_PROJECT,
