@@ -851,5 +851,10 @@ Resources:
       - DiscordApiGatewayStage
       - DiscordApiGatewayPermission
       - OperationFunction
+      # setting the endpoint makes discord immediately PING it, and the operation function reads
+      # the public key out of ssm to verify that ping -- so the param HAS to exist first. nothing
+      # references it, so without this cloudformation is free to build it in parallel and we lose
+      # the race on some deploys and not others :(
+      - DiscordPublicKeyParameter
     Properties:
       ServiceToken: !GetAtt StartUpFunction.Arn # run this function after the stack is created

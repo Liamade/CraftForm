@@ -13,7 +13,11 @@ import json
 import base64
 from nacl.signing import VerifyKey  # cryptographic library for verifying signatures
 
-from commands import server, template, region, update  # the actual command handlers
+from commands import template, region, update  # the actual command handlers
+# NOTE: server is PARKED until services/record.py + services/bake.py exist. python resolves
+# imports at load time, so pulling it in early kills the WHOLE lambda before it runs a line --
+# which shows up as discord refusing to verify the interactions endpoint. goes back in
+# alongside the route below once those two services are built :)
 from services import ssm  # ssm helpers -- call as ssm.get_discord_public_key(), ssm.get_parameter(), etc.
 import responses  # discord interaction-response builders -- responses.pong(), etc.
 
@@ -60,8 +64,9 @@ def handler(event, context):
         options = body["data"].get("options", [])  # top-level commands like /update have no subcommands, so this can be empty
         subcommand = options[0]["name"] if options else None  # only grab a subcommand if there actually is one
 
-        if command == "server":
-            return server.handle(subcommand, options, body)
+        # PARKED -- goes back in with the import up top once record + bake exist
+        # if command == "server":
+        #     return server.handle(subcommand, options, body)
 
         if command == "template":
             return template.handle(subcommand, options, body)
