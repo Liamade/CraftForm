@@ -630,6 +630,39 @@ Resources:
       Action: lambda:InvokeFunction # what action the gateway is allowed to do to the function - invoke it
       Principal: apigateway.amazonaws.com # who is allowed to do the action - API Gateway service
       SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${DiscordApiGateway}/*/* # only allow this specific API Gateway to invoke
+  # ------------------------------------------CODE BUILD-----------------------------------------
+  # CODEBUILD PROJECT - runs terraform to deploy the region infrastructure
+  CodeBuildTerraform:
+    Type: AWS::CodeBuild::Project
+    DependsOn:
+      - StageCodeTrigger
+    Properties:
+      Name: craftform-terraform
+      Description: CodeBuild project to run Terraform for CraftForm region deployments.
+      Tags:
+        - Key: Project
+          Value: craftform
+        - Key: Environment
+          Value: HomeRegion
+      ServiceRole: !GetAtt CodeBuildTerraformRole.Arn # the role the build runs under
+
+      Environment:
+        Type: LINUX_CONTAINER # use a Linux container for the build environment
+        Image: aws/codebuild/standard:7.0
+        ComputeType: BUILD_GENERAL1_SMALL # small compute type for cost efficiency
+        EnvironmentVariables:
+          - Name: HOME_REGION
+            Value: !Ref AWS::Region # set the default AWS region for the build environment
+          - Name: STATE_BUCKET
+            Value: !Ref CraftFormHomeBucket # pass the S3 bucket name to the build environment
+      Source:
+        Type: S3 # source code comes from S3 (the staged terraform.zip)
+        Location: !Sub ${CraftFormHomeBucket}/lambda-code/terraform.zip # location of the staged terraform.zip in S3
+        BuildSpec: buildspec.yaml
+      ConcurrentBuildLimit: 1 # limit to one concurrent build to avoid race conditions
+      TimeoutInMinutes: 10 # set a timeout in case it stalls or takes too long
+      Artifacts:
+        Type: NO_ARTIFACTS # no artifacts are produced by this build
 
   # -----------------------------------------LAMBDA FUNCTIONS------------------------------------------
   # STAGING LAMBDA FUNCTION - used to stage the code for the other lambda function in S3 before deployment.
@@ -779,7 +812,7 @@ Resources:
   # Lambda function for startup tasks -  gets triggered when the stack is created
   StartUpFunction:
     Type: AWS::Lambda::Function
-    DependsOn: StageCode # ensure the code is staged before creating the Lambda
+    DependsOn: StageCodeTrigger # ensure the code is staged before creating the Lambda
     Properties:
       FunctionName: craftform-startup-function
       Description: Lambda function to perform startup tasks for CraftForm, such as
@@ -811,7 +844,7 @@ Resources:
   # Lambda function for handling all operations for CraftForm - basically the main function
   OperationFunction:
     Type: AWS::Lambda::Function
-    DependsOn: StageCode # ensure the code is staged before creating the Lambda
+    DependsOn: StageCodeTrigger # ensure the code is staged before creating the Lambda
 
     Properties:
       FunctionName: craftform-operation-function
@@ -834,7 +867,7 @@ Resources:
   # ------------------------------------------RESOURCE TRIGGER-----------------------------------------
 
   # CUSTOM STAGE CODE RESOURCE - trigger the staging Lambda function to stage the code in S3 before creating the other functions
-  StageCode:
+  StageCodeTrigger:
     Type: AWS::CloudFormation::CustomResource
     Properties:
       ServiceToken: !GetAtt StagingFunction.Arn # the lambda function to run
