@@ -14,6 +14,7 @@ provider "aws" { # where Terraform should deploy to
   default_tags { # tagging for all the created resources -- really useful for the IAM policy
     tags = {
       "Project" = "craftform"
+      "Environment" = var.region
     }
   }
 
@@ -28,7 +29,6 @@ provider "aws" {
   default_tags {
     tags = {
       "Project" = "craftform"
-      "Environment" = var.region
     }
   }
 }
