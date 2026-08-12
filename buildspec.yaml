@@ -63,7 +63,7 @@ phases:
       ACTUAL=$(sha256sum /tmp/terraform.zip | awk '{print $1}')                                                 # hash what we actually got
       echo "expected: $EXPECTED"   # print both so a failure says WHAT didn't match
       echo "actual:   $ACTUAL"
-      if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then   # -z catches a typo'd TF_VERSION, otherwise empty sails through :(
+      if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then   # if the expected hash or if the actual hash doesn't match = no beuno
         echo "terraform checksum did NOT match, refusing to install it :("
         exit 1   # kills the phase -> post_build still tells discord
       fi
