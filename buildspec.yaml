@@ -53,9 +53,22 @@ phases:
     - curl -fsSL -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
 
     # ========================VERIFY TERRAFORM========================
-    # pull the checksums down and make sure the zip we got is the zip they published
+    # pull the checksums down and make sure the zip we got is the zip they published.
+    # NOTE: can't just pipe the sums into `sha256sum -c` -- that reads the FILENAME out of
+    # the sums file and goes hunting for it in the current directory. ours is saved as
+    # /tmp/terraform.zip, so it'd look for the wrong name in the wrong place and fail.
+    # pulling the two hashes out and comparing them ourselves sidesteps all of that
     - curl -fsSL -o /tmp/terraform_SHA256SUMS "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_SHA256SUMS"
-    - grep "terraform_${TF_VERSION}_linux_amd64.zip" /tmp/terraform_SHA256SUMS | sha256sum -c -
+    - |
+      EXPECTED=$(grep "terraform_${TF_VERSION}_linux_amd64.zip" /tmp/terraform_SHA256SUMS | awk '{print $1}')
+      ACTUAL=$(sha256sum /tmp/terraform.zip | awk '{print $1}')
+      echo "expected: $EXPECTED"
+      echo "actual:   $ACTUAL"
+      if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
+        echo "terraform checksum did NOT match, refusing to install it :("
+        exit 1
+      fi
+      echo "checksum matches :)"
 
     # ========================INSTALL TERRAFORM=======================
     # drop the binary somewhere already on PATH, then prove it actually runs
