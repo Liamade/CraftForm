@@ -10,41 +10,35 @@
 #║  project has to point at this one by name -> BuildSpec: buildspec.yaml       ║
 #╚══════════════════════════════════════════════════════════════════════════════╝
 
-# the BUILDSPEC format version (not ours) -- 0.2 is the only one worth using
-version: 0.2
+version: 0.2   # the buildspec format version, not ours
 
 #============================================================
 #                 VARIABLE SETTINGS
 #============================================================
-# BAKED IN -- lives right here, same for every single run
+# BAKED IN -- right here, same every run
 #   TF_VERSION        the terraform version to install
 #
-# SET ON THE PROJECT -- cloudformation writes these once, never change
-#   HOME_REGION       the control-plane region (where state + ssm live)
+# SET ON THE PROJECT -- cloudformation writes these once
+#   HOME_REGION       control-plane region (where state + ssm live)
 #   STATE_BUCKET      the home bucket holding the terraform state
 #
 # INJECTED PER RUN -- the operations lambda passes these to start_build
-#   DEPLOY_REGION     the region we're actually building INTO
+#   DEPLOY_REGION     the region we're building INTO
 #   TF_ACTION         create or destroy
-#   DISCORD_APP_ID    the discord bot id, for the followup webhook
+#   DISCORD_APP_ID    the bot id, for the followup webhook
 #   DISCORD_TOKEN     the interaction token, so we edit the RIGHT message
-#
-# anything in here is just a normal shell env var by the time the commands run,
-# so $DEPLOY_REGION and friends work exactly how you'd expect them to
 
 env:
   variables:
-    # terraform version to install -- mainly used to easily upgrade later on
-    TF_VERSION: "1.11.4"
-    # tells terraform it's running unattended so it never tries to prompt us
-    TF_IN_AUTOMATION: "1"
+    TF_VERSION: "1.11.4"   # bump here to upgrade terraform
+    TF_IN_AUTOMATION: "1"  # tells terraform nobody's watching, so don't prompt
 
 #============================================================
 #                 BUILD EXECUTION
 #============================================================
-# codebuild runs these phases IN ORDER: install -> build -> post_build.
-# if install or build dies it skips straight to post_build, which is the whole
-# reason the discord reporting lives down there and not at the end of build :)
+# runs in order: install -> build -> post_build.
+# if install or build dies it jumps STRAIGHT to post_build -- that's the only
+# reason the discord reporting works when terraform fails :)
 
 phases:
 
@@ -55,55 +49,29 @@ phases:
     commands:
 
     # =======================DOWNLOAD TERRAFORM=======================
-    # the runner image doesn't ship terraform, so we grab it ourselves.
-    # this is the bit github's setup-terraform action used to do for us.
-    #   -f  fail loudly on a 404 instead of happily saving the error page
-    #   -s  silent, no progress bar clogging up the logs
-    #   -S  ...but DO still print the error if it breaks
-    #   -L  follow redirects -- hashicorp bounces us to a CDN
-    #   -o  write it out to this path
-    - curl -fsSL -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+    # the image doesn't ship terraform, so we grab it -- github's setup-terraform did this for us
+    - curl -fsSL -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"   # -f die on a 404, -s quiet, -S but show errors, -L follow redirects
 
     # ========================VERIFY TERRAFORM========================
-    # hashicorp publishes a sums file next to every release -- grab it so we can prove
-    # the zip we just pulled is byte-for-byte the one they actually shipped
+    # the sums file hashicorp publishes next to every release
     - curl -fsSL -o /tmp/terraform_SHA256SUMS "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_SHA256SUMS"
 
-    # NOTE: can't just pipe the sums into `sha256sum -c` -- that reads the FILENAME out of
-    # the sums file and goes hunting for it in the current directory. ours is saved as
-    # /tmp/terraform.zip, so it'd look for the wrong name in the wrong place and fail.
-    # pulling the two hashes out and comparing them ourselves sidesteps all of that
+    # NOTE: can't pipe this into `sha256sum -c` -- it reads the FILENAME out of the sums
+    # file and hunts for it in the current dir. ours is /tmp/terraform.zip, so it'd miss
     - |
-      # the sums file has a line per platform, so grep OUR platform's line, then awk
-      # $1 to peel off just the hash (the filename is sat in $2 and we don't want it)
-      EXPECTED=$(grep "terraform_${TF_VERSION}_linux_amd64.zip" /tmp/terraform_SHA256SUMS | awk '{print $1}')
-
-      # now hash the file we actually downloaded and peel that one the same way
-      ACTUAL=$(sha256sum /tmp/terraform.zip | awk '{print $1}')
-
-      # print both so a future failure tells us WHAT didn't line up instead of just dying
-      echo "expected: $EXPECTED"
+      EXPECTED=$(grep "terraform_${TF_VERSION}_linux_amd64.zip" /tmp/terraform_SHA256SUMS | awk '{print $1}')   # our platform's line, $1 = the hash
+      ACTUAL=$(sha256sum /tmp/terraform.zip | awk '{print $1}')                                                 # hash what we actually got
+      echo "expected: $EXPECTED"   # print both so a failure says WHAT didn't match
       echo "actual:   $ACTUAL"
-
-      # -z catches EXPECTED being empty, which means grep found nothing -- usually a typo'd
-      # TF_VERSION. gotta check it, otherwise an empty string matching nothing would sail
-      # straight through and we'd install an unverified binary thinking we'd checked it :(
-      if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
+      if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then   # -z catches a typo'd TF_VERSION, otherwise empty sails through :(
         echo "terraform checksum did NOT match, refusing to install it :("
-        exit 1    # non-zero kills the phase -> build fails -> post_build tells discord
+        exit 1   # kills the phase -> post_build still tells discord
       fi
       echo "checksum matches :)"
 
     # ========================INSTALL TERRAFORM=======================
-    # unzip it straight into a folder that's already on PATH, so we can just type
-    # "terraform" from here on out instead of a full path.
-    #   -o  overwrite without stopping to ask
-    #   -q  quiet
-    #   -d  unzip INTO this directory
-    - unzip -oq /tmp/terraform.zip -d /usr/local/bin && chmod +x /usr/local/bin/terraform
-
-    # cheap smoke test -- if this prints a version we KNOW the binary is good to go
-    - terraform version
+    - unzip -oq /tmp/terraform.zip -d /usr/local/bin && chmod +x /usr/local/bin/terraform   # into a dir already on PATH. -o overwrite, -q quiet, -d where to
+    - terraform version   # smoke test -- if this prints, the binary's good
 
  # ----------------------------------------------------------
  #                      TERRAFORM
@@ -118,45 +86,30 @@ phases:
     commands:
 
     # =========================TERRAFORM INIT=========================
-    # init downloads the aws provider and wires up the s3 backend.
-    #   -input=false     never prompt -- there's nobody here to answer, it'd just hang
-    #   -no-color        strip the ANSI codes, they show up as garbage in cloudwatch
-    #   -lock-timeout    if another run holds the state lock, WAIT a minute instead of
-    #                    falling over instantly. two /region commands back to back
-    #
-    # the backend block in terraform.tf is deliberately left empty (a "partial config")
-    # so these three get injected per run -- that's how ONE set of terraform code can
-    # manage every region separately. each region gets its own key = its own state file.
-    #   bucket = state storage | key = per-region object path | region = where the bucket lives
-    #
-    # init only ever talks to the HOME region -- the deploy region doesn't show up until plan
+    # the backend block in terraform.tf is left EMPTY on purpose, so these get injected per
+    # run -- that's how one set of terraform code manages every region off its own state file
     - |
       terraform init -input=false -no-color -lock-timeout=60s \
         -backend-config="bucket=${STATE_BUCKET}" \
         -backend-config="key=regions/${DEPLOY_REGION}/terraform.tfstate" \
         -backend-config="region=${HOME_REGION}"
+      # -input=false never prompt (nobody's here) | -no-color ANSI is garbage in cloudwatch
+      # -lock-timeout wait a min for the state lock instead of dying -- two /region's back to back
+      # bucket = state storage | key = per-region object path | region = where the bucket lives
 
     # =========================TERRAFORM PLAN=========================
-    # plan works out WHAT would change without touching anything yet
     - |
       FLAG=''     # simple flag based on if the run is a destroy or a create
       if [ "$TF_ACTION" = "destroy" ]; then FLAG='-destroy'; fi
-
-      # $FLAG is left UNQUOTED on purpose -- if it's empty we want it to vanish entirely.
-      # quoting it would hand terraform an empty argument and it'd choke on that
-      #
-      #   -out=tfplan   save the plan to a file so apply does EXACTLY what we just planned,
-      #                 instead of re-deciding and maybe doing something different
-      #   -var=         passed straight in rather than as TF_VAR_* exports, since exports
-      #                 don't survive from one command to the next in here
       terraform plan $FLAG -out=tfplan -input=false -no-color \
         -var="region=${DEPLOY_REGION}" \
         -var="home_region=${HOME_REGION}"
+      # $FLAG UNQUOTED on purpose -- quoted, an empty one becomes an empty arg and terraform chokes
+      # -out saves the plan so apply does EXACTLY this, no re-deciding
+      # -var passed straight in, since exports don't survive to the next command
 
     # ========================TERRAFORM APPLY=========================
-    # feeding it the SAVED plan file, so there's no re-planning and no surprises --
-    # and no -var needed either, the values are already baked into tfplan
-    - terraform apply -input=false -no-color tfplan
+    - terraform apply -input=false -no-color tfplan   # the SAVED plan, so no -var needed -- already baked in
 
  # ----------------------------------------------------------
  #                   DISCORD RESPONSE
@@ -168,23 +121,15 @@ phases:
 
     # ==========================REPORT BACK===========================
     - |
-      # CODEBUILD_BUILD_SUCCEEDING is 1 while we're still fine, 0 once something broke.
-      # codebuild sets this for us -- it's how post_build knows which way the build went
-      if [ "$CODEBUILD_BUILD_SUCCEEDING" = "1" ]; then
-        # ${TF_ACTION}d just tacks a d on the end -- create -> "created", destroy -> "destroyed" :)
-        # the \` backticks wrap the region in discord's inline-code formatting
-        MESSAGE="Region \`$DEPLOY_REGION\` was ${TF_ACTION}d successfully. :)"
+      if [ "$CODEBUILD_BUILD_SUCCEEDING" = "1" ]; then   # codebuild sets this -- 1 = fine, 0 = something broke
+        MESSAGE="Region \`$DEPLOY_REGION\` was ${TF_ACTION}d successfully. :)"   # ${TF_ACTION}d -> "created" / "destroyed". backticks = discord code formatting
       else
         MESSAGE="Something went wrong while trying to $TF_ACTION region \`$DEPLOY_REGION\`. Check the build logs. :("
       fi
 
       # the @original endpoint edits the deferred "thinking..." message we left the user on.
-      # no auth header needed -- the interaction token in the URL IS the credential, which
-      # is also why it only lasts 15 minutes and can only touch this one message
-      #
-      # jq -n --arg builds the json for us so quotes or newlines in MESSAGE can't break
-      # out and mangle the payload -- never hand-roll json in a shell string
+      # no auth header -- the token IN the url is the credential, which is why it dies in 15 min
       curl -sS -X PATCH \
         "https://discord.com/api/v10/webhooks/${DISCORD_APP_ID}/${DISCORD_TOKEN}/messages/@original" \
         -H "Content-Type: application/json" \
-        -d "$(jq -n --arg content "$MESSAGE" '{content: $content}')"
+        -d "$(jq -n --arg content "$MESSAGE" '{content: $content}')"   # jq builds the json so a quote in MESSAGE can't break it
