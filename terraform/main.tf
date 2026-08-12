@@ -28,6 +28,7 @@ provider "aws" {
   default_tags {
     tags = {
       "Project" = "craftform"
+      "Environment" = var.region
     }
   }
 }
