@@ -18,4 +18,4 @@ secrets       = boto3.client("secretsmanager")  # the craftform secret bundle (d
 lambda_client = boto3.client("lambda")          # invoking other craftform functions (e.g. /update -> staging)
 ec2           = boto3.client("ec2")             # used for describe_regions to list all available AWS regions
 s3            = boto3.client("s3")              # peek into per-region world buckets (empty-check before delete)
-codebuild     = boto3.client("codebuild")       # kicks off the terraform build for /region create + delete
+codebuild     = boto3.client("codebuild")       # kicks off the long builds -- craftform-region + craftform-server

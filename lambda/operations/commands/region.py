@@ -14,9 +14,10 @@ import responses  # discord interaction-response builders
 # the prefix every deployed region's config lives under
 REGIONS_PREFIX = "/craftform/regions/"
 
-# the codebuild project that actually runs terraform -- this replaced the old github actions
-# workflow. the name is hardcoded in the operations lambda's IAM policy too, so they have to match
-TERRAFORM_PROJECT = "craftform-terraform"
+# the codebuild project that actually runs terraform for regions -- this replaced the old github
+# actions workflow. the operations lambda's IAM policy allows codebuild:StartBuild on craftform-*,
+# so this has to keep that prefix. servers get their own project, hence the -region suffix
+REGION_PROJECT = "craftform-region"
 
 # the regions CraftForm is willing to deploy into 
 REGION_NAMES = {
@@ -112,7 +113,7 @@ def handle(subcommand, options, body):
         # these names have to line up with what buildspec.yaml reads, so don't rename one alone :)
         try:
             codebuild.start_build(
-                projectName=TERRAFORM_PROJECT,
+                projectName=REGION_PROJECT,
                 environmentVariablesOverride=[
                     {"name": "DEPLOY_REGION", "value": region},                   # the region we're building INTO
                     {"name": "TF_ACTION", "value": action},                       # create or destroy

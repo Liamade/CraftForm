@@ -46,10 +46,10 @@ Parameters:
 Resources:
 
 # ------------------------------------------IAM ROLES------------------------------------------
-  # TERRAFORM BUILD ROLE -- the role the CodeBuild project runs terraform under.
+  # REGION BUILD ROLE -- the role the region CodeBuild project runs terraform under.
   # this is the exact same permission set the old github actions role carried, just handed to
   # codebuild instead -- no OIDC provider, no federation, no long-lived keys anywhere :)
-  CodeBuildTerraformRole:
+  CodeBuildRegionRole:
     Type: AWS::IAM::Role
     Properties:
       # tags
@@ -58,7 +58,7 @@ Resources:
           Value: craftform
         - Key: Environment
           Value: HomeRegion
-      RoleName: craftform-terraform-build # Name of the IAM role the terraform builds run as
+      RoleName: craftform-region-build # Name of the IAM role the region builds run as
       AssumeRolePolicyDocument:
         # who is allowed to assume this role - the CodeBuild service
         Version: '2012-10-17'
@@ -74,7 +74,7 @@ Resources:
 
       Policies:
         # inline policies for the role - permissions that the role has
-        - PolicyName: craftform-terraform-build-policy
+        - PolicyName: craftform-region-build-policy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -248,13 +248,15 @@ Resources:
                 Action: secretsmanager:GetSecretValue
                 Resource: !Sub arn:aws:secretsmanager:*:${AWS::AccountId}:secret:craftform-secrets-*
 
-              # ---- /region create + delete kick off the terraform build ----
+              # ---- the slash commands kick off the long-running builds ----
               # arn is written out by hand instead of !GetAtt so this role doesn't depend on the
-              # project resource -- just make sure the project is named craftform-terraform
-              - Sid: StartTerraformBuild
+              # project resources. wildcarded on craftform-* so /region hits craftform-region and
+              # /server hits craftform-server without needing another policy edit -- same trick
+              # the log-group statement above already uses :)
+              - Sid: StartCraftFormBuilds
                 Effect: Allow
                 Action: codebuild:StartBuild
-                Resource: !Sub arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/craftform-terraform
+                Resource: !Sub arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/craftform-*
 
               # ---- peek into per-region world buckets to check they're empty before a delete ----
               # /region delete blocks teardown if the bucket still holds world data. ListBucket is
@@ -631,20 +633,22 @@ Resources:
       Principal: apigateway.amazonaws.com # who is allowed to do the action - API Gateway service
       SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${DiscordApiGateway}/*/* # only allow this specific API Gateway to invoke
   # ------------------------------------------CODE BUILD-----------------------------------------
-  # CODEBUILD PROJECT - runs terraform to deploy the region infrastructure
-  CodeBuildTerraform:
+  # REGION CODEBUILD PROJECT - runs terraform to deploy/tear down region infrastructure.
+  # the server bake gets its OWN project (craftform-server) -- different tooling, different
+  # iam, and a server build shouldn't sit in queue behind a region deploy :)
+  CodeBuildRegion:
     Type: AWS::CodeBuild::Project
     DependsOn:
       - StageCodeTrigger
     Properties:
-      Name: craftform-terraform
+      Name: craftform-region
       Description: CodeBuild project to run Terraform for CraftForm region deployments.
       Tags:
         - Key: Project
           Value: craftform
         - Key: Environment
           Value: HomeRegion
-      ServiceRole: !GetAtt CodeBuildTerraformRole.Arn # the role the build runs under
+      ServiceRole: !GetAtt CodeBuildRegionRole.Arn # the role the build runs under
 
       Environment:
         Type: LINUX_CONTAINER # use a Linux container for the build environment
