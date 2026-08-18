@@ -47,6 +47,29 @@ def get_dict(name):
     return json.loads(ssm.get_parameter(Name=name)["Parameter"]["Value"])
 
 
+# ====================================PUT A JSON DICT====================================
+# overwrite=False is the CREATE guard -- ssm rejects a name that's already taken, and it's
+# atomic, so no check-then-write race. returns True if it wrote, False if the name was
+# taken. we swallow the exception because callers import this MODULE, not the raw client :)
+def put_dict(name, data, overwrite=True):
+    try:
+        ssm.put_parameter(
+            Name=name,
+            Value=json.dumps(data),
+            Type="String",
+            Overwrite=overwrite,
+        )
+        return True
+
+    except ssm.exceptions.ParameterAlreadyExists:
+        return False  # only reachable with overwrite=False -- the name's in use
+
+
+# ====================================DELETE A PARAMETER=================================
+def delete_parameter(name):
+    ssm.delete_parameter(Name=name)
+
+
 # ============================GET THE DISCORD PUBLIC KEY (cached)============================
 # the discord public key never changes, so there's no point hitting ssm on every single
 # invocation. we fetch it ONCE per cold start and reuse it on every warm one after that :)

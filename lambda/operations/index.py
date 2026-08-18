@@ -13,11 +13,7 @@ import json
 import base64
 from nacl.signing import VerifyKey  # cryptographic library for verifying signatures
 
-from commands import template, region, update  # the actual command handlers
-# NOTE: server is PARKED until services/record.py + services/bake.py exist. python resolves
-# imports at load time, so pulling it in early kills the WHOLE lambda before it runs a line --
-# which shows up as discord refusing to verify the interactions endpoint. goes back in
-# alongside the route below once those two services are built :)
+from commands import template, region, update, server  # the actual command handlers
 from services import ssm  # ssm helpers -- call as ssm.get_discord_public_key(), ssm.get_parameter(), etc.
 import responses  # discord interaction-response builders -- responses.pong(), etc.
 
@@ -64,9 +60,8 @@ def handler(event, context):
         options = body["data"].get("options", [])  # top-level commands like /update have no subcommands, so this can be empty
         subcommand = options[0]["name"] if options else None  # only grab a subcommand if there actually is one
 
-        # PARKED -- goes back in with the import up top once record + bake exist
-        # if command == "server":
-        #     return server.handle(subcommand, options, body)
+        if command == "server":
+            return server.handle(subcommand, options, body)
 
         if command == "template":
             return template.handle(subcommand, options, body)
@@ -77,13 +72,29 @@ def handler(event, context):
         if command == "update":
             return update.handle(subcommand, options, body)
 
-    # ====================================ROUTE COMPONENT INTERACTIONS===================================
-    if body["type"] == 3:
-        # this splits the custom_id so i can map it to only one function and lessen the logic
-        command, subcommand = body["data"]["custom_id"].split(':')  # command = part[0] | subcommand =part[1]
+    # ====================================ROUTE AUTOCOMPLETE===================================
+    # type 4 = discord asking what to suggest while the user is still typing. fires on
+    # every keystroke, so these handlers stay cheap :)
+    if body["type"] == 4:
+        command = body["data"]["name"]
+        options = body["data"].get("options", [])
+
+        if command == "server":
+            return server.autocomplete(options, body)
+
+    # ====================================ROUTE COMPONENTS + MODALS===================================
+    # type 3 = clicked a button / picked from a dropdown | type 5 = submitted a modal.
+    # both carry a custom_id instead of a command name, so they route the same way
+    if body["type"] in (3, 5):
+        # split ONCE -- everything after the first colon belongs to the handler, which is
+        # what lets a custom_id carry state like "server:form:vanilla:us-east-1"
+        command, subcommand = body["data"]["custom_id"].split(':', 1)
 
         if command == "region":
             return region.handle(subcommand, [], body)
+
+        if command == "server":
+            return server.handle(subcommand, [], body)
 
 
 

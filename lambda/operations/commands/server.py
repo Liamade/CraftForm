@@ -4,8 +4,9 @@
 # ║  OPERATIONS LAMBDA  ::  commands/server.py                                   ║
 # ║  Handles all /server slash command interactions.                             ║
 # ║                                                                              ║
-# ║  THE SPINE: every command works off one record (services.record).            ║
-# ║  Only CREATE + SAVE ever go async to GitHub Actions (they bake an AMI).      ║
+# ║  THE SPINE: every command works off one record, a json blob in SSM keyed by  ║
+# ║  the server's NAME: /craftform/regions/{region}/servers/{name}               ║
+# ║  Only CREATE + SAVE ever go async to CodeBuild (they bake an AMI).           ║
 # ║  Everything else finishes IN this Lambda (SSM reads + fast boto3 calls).     ║
 # ║                                                                              ║
 # ║  Only CREATE/SAVE + the bake recipe ever know a "type"                       ║
@@ -13,15 +14,27 @@
 # ║  modpack/custom later is additive, not a refactor.                           ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
-import json
+import re
+from aws_clients import codebuild
 from services import ssm
-from services import record        # thin store over SSM: get / put / list / delete a server record
-from services import bake          # fires the ONE bake workflow (workflow_dispatch) with
-                                    # scalars + server_id. The RUNNER owns everything after:
-                                    # read record -> resolve descriptor -> hash -> cache check
-                                    # -> reuse-or-bake -> launch -> write back -> notify Discord.
-                                    # The responder NEVER checks the cache, hashes, or passes
-                                    # the spec inline. It hands over a pointer (server_id).
+import responses
+
+# separate project from craftform-region: different IAM, and a bake shouldn't queue
+# behind a terraform run. hardcoded in the operations lambda's IAM policy too :)
+SERVER_PROJECT = "craftform-server"
+
+# the name IS the ssm path, so it only gets characters a path survives
+NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]{3,32}$")
+
+# shape check only -- whether mojang HAS the version is the build's problem
+VERSION_PATTERN = re.compile(r"^(latest|\d+\.\d+(\.\d+)?)$")
+
+# friendly size -> what we actually launch
+SIZES = {
+    "small":  "t3.small",
+    "medium": "t3.medium",
+    "large":  "t3.large",
+}
 
 # ==========================================================================================
 #                                   /SERVER COMMAND
@@ -45,67 +58,118 @@ def handle(subcommand, options, body):
         pass
 
     # ===============================<CREATE>================================
-    # ROLE: the heavy/async one. Responder does ONLY the cheap part, then hands off.
-    # NOTE: create is a subcommand GROUP -> the variant is nested one layer deeper.
-    #       options[0] is the variant (vanilla|modpack|custom); its options are the args.
-    #
-    # SHARED FLOW (same for all three variants -- only the descriptor differs):
-    #   0. DEFER FIRST. The bake is minutes; even the dispatch can blow the 3s deadline.
-    #      Send the deferred ACK now, edit the message with the result below.
-    #   - build the record: server_id, name+owner (from body), region, type, state="baking",
-    #     world bucket/prefix, and spec = the descriptor for this variant (the FULL config).
-    #   - record.put(record)  <-- the descriptor lives in the RECORD, not in the dispatch.
-    #   - bake.dispatch(server_id + scalars)  <-- pointer, not payload. The runner reads the
-    #     record, resolves the descriptor itself, hashes it, checks the template cache
-    #     (HIT: reuse ami_id / MISS: bake a fresh one and register it under the hash),
-    #     launches the instance either way, writes back ami_id + spec_hash + instance_id +
-    #     state=created, and notifies Discord. On ANY failure it flips state=failed and
-    #     notifies -- so a dead bake never leaves a ghost stuck on "baking".
-    #   - edit deferred msg -> "Baking your {variant} server. /server status to check."
-    #
-    # So each variant block below only needs to: (a) read its args, (b) do CHEAP structural
-    # validation, (c) assemble its descriptor. No network resolution here -- that's the runner.
+    # ROLE: the heavy/async one. this lambda does ONLY the cheap part, then hands off to codebuild
     elif subcommand == "create":
 
-        # --- 0. ACK FIRST (defer) ---
-
-        # capture the variant and its arguments
-        variant = options[0]["name"]    # vanilla | modpack | custom
-        args    = {o["name"]: o["value"] for o in options[0].get("options", [])}
-
-        # which regions we've actually deployed (validate the target against this)
-        active_regions = ssm.list_names_under("/craftform/regions/")
+        variant, args = create_args(options)
 
         # -------------------------------<VANILLA>-------------------------------
         if variant == "vanilla":
-            pass
-            # args:     mc_version (+ region, unless defaulted to the home region)
-            # validate: version in supported list? region in active_regions? name free?
-            #           (all cheap/local -- version check is a table lookup, no network)
-            #           on fail: edit the deferred msg with the error and return.
-            # descriptor: spec = {"mc_version": ...}
-            # -> then the SHARED FLOW above (build record, put, dispatch, edit msg).
-            #    Runner derives Java from mc_version, installs jar, writes EULA + systemd.
+            # autocomplete SUGGESTS, it doesn't RESTRICT -- discord still lets people
+            # ignore the list and type whatever they like, so check it for real
+            region = args.get("region", "")
+
+            if region not in ssm.list_names_under("/craftform/regions/"):
+                return responses.plain_message(
+                    f"`{region}` isn't a deployed region — run `/region list` to see what's available."
+                )
+
+            return responses.modal(
+                f"server:form:{variant}:{region}",
+                f"New {variant} server in {region}",
+                [
+                    {
+                        "custom_id":   "name",
+                        "label":       "Server name",
+                        "placeholder": "letters, numbers, - _ . (3-32 chars)",
+                    },
+                    {
+                        "custom_id":   "mc_version",
+                        "label":       "Minecraft version",
+                        "placeholder": "latest",
+                        "value":       "latest",
+                    },
+                    {
+                        "custom_id":   "size",
+                        "label":       "Size",
+                        "placeholder": "small | medium | large",
+                        "value":       "small",
+                    },
+                ],
+            )
 
         # -------------------------------<MODPACK>-------------------------------
         elif variant == "modpack":
             pass
             # FUTURE. args: mrpack_url
-            # validate: well-formed Modrinth URL (optionally a cheap reachability check,
-            #           AFTER defer, to fail fast on a dead link before paying for a dispatch).
-            # descriptor: spec = {"mrpack_url": ...}
-            # -> SAME shared flow. The runner resolves the .mrpack (loader, mc_version, mods),
-            #    hashes the resolved contents, and bakes the modded recipe. Nothing here changes.
 
         # -------------------------------<CUSTOM>--------------------------------
         elif variant == "custom":
             pass
             # FUTURE. args: loader, mc_version
-            # validate: loader/version combo supported?
-            # descriptor: spec = {"loader": ..., "mc_version": ...}
-            # -> SAME shared flow, but the recipe bakes a loader + EMPTY mods/ (a moddable base).
-            #    User connects via SSM Session Manager (NOT SSH), installs mods by hand, then
-            #    /server save re-bakes. Custom builds have no declared spec -> NOT deduped.
+
+    # =========================<CREATE :: THE MODAL SUBMIT>=========================
+    # api gateway is synchronous, so returning the deferred response ENDS this invocation.
+    # everything has to happen before that return :)
+    elif subcommand and subcommand.startswith("form:"):
+        _, variant, region = subcommand.split(":")
+        fields = responses.modal_values(body)
+
+        name       = fields["name"].strip()
+        mc_version = fields["mc_version"].strip().lower()
+        size       = fields["size"].strip().lower()
+
+        if not NAME_PATTERN.match(name):
+            return responses.plain_message(
+                f"`{name}` won't work as a name — stick to letters, numbers, `-`, `_` and `.` (3–32 characters)."
+            )
+
+        if size not in SIZES:
+            return responses.plain_message(f"`{size}` isn't a size I know — pick `small`, `medium`, or `large`.")
+
+        if not VERSION_PATTERN.match(mc_version):
+            return responses.plain_message(f"`{mc_version}` isn't a version I recognise — try `latest` or something like `1.21.1`.")
+
+        bucket = ssm.get_dict(f"/craftform/regions/{region}/config")["bucket_name"]
+
+        record = build_record(
+            name         = name,
+            owner        = body.get("member", body).get("user", {}).get("id"),
+            guild        = body.get("guild_id"),
+            region       = region,
+            server_type  = variant,
+            spec         = {"mc_version": mc_version},  # may be "latest" -- the build makes it concrete
+            instance_type= SIZES[size],
+            bucket       = bucket,
+            prefix       = f"servers/{name}/",
+        )
+
+        # write FIRST -- overwrite=False is the name guard, so two people racing the
+        # same name can't both win
+        path = f"/craftform/regions/{region}/servers/{name}"
+        if not ssm.put_dict(path, record, overwrite=False):
+            return responses.plain_message(f"There's already a server called `{name}` in {region} :(")
+
+        try:
+            codebuild.start_build(
+                projectName=SERVER_PROJECT,
+                environmentVariablesOverride=[
+                    {"name": "SERVER_NAME",    "value": name},
+                    {"name": "DEPLOY_REGION",  "value": region},
+                    {"name": "MC_VERSION",     "value": mc_version},
+                    {"name": "INSTANCE_TYPE",  "value": SIZES[size]},
+                    {"name": "DISCORD_APP_ID", "value": body["application_id"]},
+                    {"name": "DISCORD_TOKEN",  "value": body["token"]},  # interaction token, NOT the bot token
+                ],
+            )
+        except Exception as e:
+            print(f"Failed to start the server build: {e} :(")
+            # don't leave a ghost record stuck on "baking" for a build that never ran
+            ssm.delete_parameter(path)
+            return responses.plain_message("Couldn't kick off the server build :(")
+
+        # tell discord we're thinking -- the build will tell them how it went :)
+        return responses.deferred()
 
     # ===============================<DELETE>================================
     # ROLE: mutator with teeth. Finishes in this Lambda.
@@ -162,3 +226,84 @@ def handle(subcommand, options, body):
     else:
         pass
         # reply with an "unknown subcommand" error instead of silently returning nothing
+
+
+# ==========================================================================================
+#                                  BUILD A SERVER RECORD
+# ==========================================================================================
+# the shape of every server blob in one place. keyword-only on purpose -- these are nearly
+# all strings, and a positional swap of region/state/type would sail straight past you :)
+# the None fields get filled in by the build, so a half-built record still reads fine
+# ------------------------------------------------------------------------------------------
+def build_record(*, name, owner, guild, region, server_type, spec, instance_type, bucket, prefix):
+    return {
+        "name":          name,
+        "owner":         owner,          # discord user id of whoever ran the command
+        "guild":         guild,          # for /list filtering
+        "region":        region,
+        "type":          server_type,    # vanilla | modpack | custom
+        "spec":          spec,           # what gets hashed for ami reuse
+        "instance_type": instance_type,  # a launch param -- no rebake to resize
+        "bucket":        bucket,
+        "prefix":        prefix,
+        "state":         "baking",
+        "ami_id":        None,           # v-- filled in by the build --v
+        "spec_hash":     None,
+        "instance_id":   None,
+    }
+
+
+# ==========================================================================================
+#                            DIG THE CREATE ARGS OUT
+# ==========================================================================================
+# create is a subcommand GROUP, so what the user typed sits two layers down:
+#   options[0]["options"][0]  = the variant, and ITS options are the args
+# ------------------------------------------------------------------------------------------
+def create_args(options):
+    variant_option = options[0]["options"][0]
+    args = {option["name"]: option.get("value") for option in variant_option.get("options", [])}
+    return variant_option["name"], args
+
+
+# ==========================================================================================
+#                                    AUTOCOMPLETE
+# ==========================================================================================
+# fires on EVERY keystroke, so keep it to one ssm list and out. blowing the 3s here just
+# stops suggestions appearing rather than erroring visibly.
+#
+# variant-blind on purpose -- vanilla/modpack/custom all get region suggestions from the
+# same branch, so a new variant needs the option REGISTERED, not code in here :)
+# ------------------------------------------------------------------------------------------
+def autocomplete(options, body):
+
+    focused = focused_option(options)
+
+    # ---- region: whatever we've actually deployed ----
+    if focused and focused["name"] == "region":
+        typed = (focused.get("value") or "").lower()
+        regions = [r for r in ssm.list_names_under("/craftform/regions/") if typed in r.lower()]
+
+        # 25 max -- discord rejects the whole response if you send more
+        return responses.autocomplete(
+            [{"name": region, "value": region} for region in sorted(regions)[:25]]
+        )
+
+    # return nothing if the focused option isn't the region one
+    return responses.autocomplete([])
+
+
+# =================================FIND THE FOCUSED OPTION==================================
+# walk down until we hit the option the cursor is actually in. recursive because the depth
+# changes with the command shape -- /server start sits one layer up from /server create
+# vanilla, and only discord knows which we're looking at
+# ------------------------------------------------------------------------------------------
+def focused_option(options):
+    for option in options:
+        if option.get("focused"):
+            return option
+
+        nested = focused_option(option.get("options", []))
+        if nested:
+            return nested
+
+    return None

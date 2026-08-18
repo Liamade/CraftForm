@@ -99,7 +99,9 @@ def handle(subcommand, options, body):
 
         # ---- guard: can't tear a region down while its world-data bucket still has objects ----
         if action == "destroy":
+
             bucket = ssm.get_dict(f"/craftform/regions/{region}/config")["bucket_name"]
+            
             if s3.bucket_has_objects(bucket):
                 return responses.plain_message(
                     f"**{REGION_NAMES.get(region, region)}** still has world data stored in its S3 bucket "
@@ -107,10 +109,8 @@ def handle(subcommand, options, body):
                     "Please delete the objects in that bucket first, then run `/region delete` again. :)"
                 )
 
-        # kick off the terraform build. the region + action tell it WHAT to do, and the
-        # discord pair lets the build edit this exact "thinking..." message when it finishes.
-        # fire-and-forget on purpose -- we've got 3 seconds to answer discord, the build takes minutes.
-        # these names have to line up with what buildspec.yaml reads, so don't rename one alone :)
+
+        # kick off the terraform build. 
         try:
             codebuild.start_build(
                 projectName=REGION_PROJECT,
