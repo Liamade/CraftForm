@@ -47,6 +47,16 @@ def get_dict(name):
     return json.loads(ssm.get_parameter(Name=name)["Parameter"]["Value"])
 
 
+# ===================================GET A REGION CONFIG=================================
+# gets the config for the given region, which is just a blob dict with the keys:
+#   bucket_name       the world-data bucket for this region
+#   security_group    the minecraft SG (25565 open)
+#   instance_profile  the role the ec2 servers assume
+#   subnet_ids        {az: subnet_id} -- pick one to launch into
+def region_config(region):
+    return get_dict(f"/craftform/regions/{region}/config")
+
+
 # ====================================PUT A JSON DICT====================================
 # overwrite=False is the CREATE guard -- ssm rejects a name that's already taken, and it's
 # atomic, so no check-then-write race. returns True if it wrote, False if the name was

@@ -15,8 +15,8 @@
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 import re
-from aws_clients import codebuild
-from services import ssm
+from services import ssm, codebuild
+import regions  # the catalog -- regions.label(code) for the friendly name
 import responses
 
 # separate project from craftform-region: different IAM, and a bake shouldn't queue
@@ -130,7 +130,7 @@ def handle(subcommand, options, body):
         if not VERSION_PATTERN.match(mc_version):
             return responses.plain_message(f"`{mc_version}` isn't a version I recognise — try `latest` or something like `1.21.1`.")
 
-        bucket = ssm.get_dict(f"/craftform/regions/{region}/config")["bucket_name"]
+        bucket = ssm.region_config(region)["bucket_name"]
 
         record = build_record(
             name         = name,
@@ -150,20 +150,16 @@ def handle(subcommand, options, body):
         if not ssm.put_dict(path, record, overwrite=False):
             return responses.plain_message(f"There's already a server called `{name}` in {region} :(")
 
-        try:
-            codebuild.start_build(
-                projectName=SERVER_PROJECT,
-                environmentVariablesOverride=[
-                    {"name": "SERVER_NAME",    "value": name},
-                    {"name": "DEPLOY_REGION",  "value": region},
-                    {"name": "MC_VERSION",     "value": mc_version},
-                    {"name": "INSTANCE_TYPE",  "value": SIZES[size]},
-                    {"name": "DISCORD_APP_ID", "value": body["application_id"]},
-                    {"name": "DISCORD_TOKEN",  "value": body["token"]},  # interaction token, NOT the bot token
-                ],
-            )
-        except Exception as e:
-            print(f"Failed to start the server build: {e} :(")
+        queued = codebuild.start_build(SERVER_PROJECT, {
+            "SERVER_NAME":    name,
+            "DEPLOY_REGION":  region,
+            "MC_VERSION":     mc_version,
+            "INSTANCE_TYPE":  SIZES[size],
+            "DISCORD_APP_ID": body["application_id"],
+            "DISCORD_TOKEN":  body["token"],   # interaction token, NOT the bot token
+        })
+
+        if not queued:
             # don't leave a ghost record stuck on "baking" for a build that never ran
             ssm.delete_parameter(path)
             return responses.plain_message("Couldn't kick off the server build :(")
@@ -224,8 +220,7 @@ def handle(subcommand, options, body):
 
     # ===============================<UNKNOWN>==============================
     else:
-        pass
-        # reply with an "unknown subcommand" error instead of silently returning nothing
+        return responses.plain_message(f"Unknown /server subcommand: `{subcommand}`. :(")
 
 
 # ==========================================================================================
@@ -260,6 +255,7 @@ def build_record(*, name, owner, guild, region, server_type, spec, instance_type
 #   options[0]["options"][0]  = the variant, and ITS options are the args
 # ------------------------------------------------------------------------------------------
 def create_args(options):
+    # walk down the options tree to the variant and its args
     variant_option = options[0]["options"][0]
     args = {option["name"]: option.get("value") for option in variant_option.get("options", [])}
     return variant_option["name"], args
@@ -276,16 +272,25 @@ def create_args(options):
 # ------------------------------------------------------------------------------------------
 def autocomplete(options, body):
 
+    # gets the focused option (the one the cursor is actually in)
     focused = focused_option(options)
 
-    # ---- region: whatever we've actually deployed ----
+    # only offer region suggestions when the user is actually typing in the region field
     if focused and focused["name"] == "region":
+        # get the currently typed value
         typed = (focused.get("value") or "").lower()
-        regions = [r for r in ssm.list_names_under("/craftform/regions/") if typed in r.lower()]
 
-        # 25 max -- discord rejects the whole response if you send more
+        # filter the DEPLOYED (ones in ssm) regions to those matching what's been typed so far.
+        # match on the CODE or the friendly name, so "us-east" and "virginia" both land :)
+        deployed = [
+            code for code in ssm.list_names_under("/craftform/regions/")
+            if typed in code.lower() or typed in regions.label(code).lower()
+        ]
+
+        # show the friendly name, SEND the code -- discord hands `value` back, not `name`.
+        # same "Name · code" shape /region list uses, so the two commands read alike
         return responses.autocomplete(
-            [{"name": region, "value": region} for region in sorted(regions)[:25]]
+            [{"name": f"{regions.label(code)}  ·  {code}", "value": code} for code in sorted(deployed)[:25]]
         )
 
     # return nothing if the focused option isn't the region one
@@ -298,11 +303,14 @@ def autocomplete(options, body):
 # vanilla, and only discord knows which we're looking at
 # ------------------------------------------------------------------------------------------
 def focused_option(options):
+    # walk down the options tree until we find the one the cursor is actually in
     for option in options:
         if option.get("focused"):
             return option
-
+        # if the option has nested options, keep going down until we find the focused one
         nested = focused_option(option.get("options", []))
+        
+        # if focused option found in nested option list, just return
         if nested:
             return nested
 
