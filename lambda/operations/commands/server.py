@@ -15,6 +15,7 @@
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 import re
+import json
 from services import ssm, codebuild
 import regions  # the catalog -- regions.label(code) for the friendly name
 import responses
@@ -113,55 +114,15 @@ def handle(subcommand, options, body):
     # everything has to happen before that return :)
     elif subcommand and subcommand.startswith("form:"):
         _, variant, region = subcommand.split(":")
-        fields = responses.modal_values(body)
 
-        name       = fields["name"].strip()
-        mc_version = fields["mc_version"].strip().lower()
-        size       = fields["size"].strip().lower()
+        # one call does the checking AND the packing -- we get either the handoff or a reason
+        env, error = build_env(variant, region, responses.modal_values(body), body)
 
-        if not NAME_PATTERN.match(name):
-            return responses.plain_message(
-                f"`{name}` won't work as a name — stick to letters, numbers, `-`, `_` and `.` (3–32 characters)."
-            )
+        # every rejection comes back already worded for the user, so just forward it
+        if error:
+            return responses.plain_message(error)
 
-        if size not in SIZES:
-            return responses.plain_message(f"`{size}` isn't a size I know — pick `small`, `medium`, or `large`.")
-
-        if not VERSION_PATTERN.match(mc_version):
-            return responses.plain_message(f"`{mc_version}` isn't a version I recognise — try `latest` or something like `1.21.1`.")
-
-        bucket = ssm.region_config(region)["bucket_name"]
-
-        record = build_record(
-            name         = name,
-            owner        = body.get("member", body).get("user", {}).get("id"),
-            guild        = body.get("guild_id"),
-            region       = region,
-            server_type  = variant,
-            spec         = {"mc_version": mc_version},  # may be "latest" -- the build makes it concrete
-            instance_type= SIZES[size],
-            bucket       = bucket,
-            prefix       = f"servers/{name}/",
-        )
-
-        # write FIRST -- overwrite=False is the name guard, so two people racing the
-        # same name can't both win
-        path = f"/craftform/regions/{region}/servers/{name}"
-        if not ssm.put_dict(path, record, overwrite=False):
-            return responses.plain_message(f"There's already a server called `{name}` in {region} :(")
-
-        queued = codebuild.start_build(SERVER_PROJECT, {
-            "SERVER_NAME":    name,
-            "DEPLOY_REGION":  region,
-            "MC_VERSION":     mc_version,
-            "INSTANCE_TYPE":  SIZES[size],
-            "DISCORD_APP_ID": body["application_id"],
-            "DISCORD_TOKEN":  body["token"],   # interaction token, NOT the bot token
-        })
-
-        if not queued:
-            # don't leave a ghost record stuck on "baking" for a build that never ran
-            ssm.delete_parameter(path)
+        if not codebuild.start_build(SERVER_PROJECT, env):
             return responses.plain_message("Couldn't kick off the server build :(")
 
         # tell discord we're thinking -- the build will tell them how it went :)
@@ -224,28 +185,54 @@ def handle(subcommand, options, body):
 
 
 # ==========================================================================================
-#                                  BUILD A SERVER RECORD
+#                              BUILD THE CODEBUILD HANDOFF
 # ==========================================================================================
-# the shape of every server blob in one place. keyword-only on purpose -- these are nearly
-# all strings, and a positional swap of region/state/type would sail straight past you :)
-# the None fields get filled in by the build, so a half-built record still reads fine
+# this builds everything needed for the codebuild project to run. it does pre-flight checks
+# on the args. It returns the env dict for the build
 # ------------------------------------------------------------------------------------------
-def build_record(*, name, owner, guild, region, server_type, spec, instance_type, bucket, prefix):
+def build_env(variant, region, fields, body, action="create"):
+
+    name       = fields["name"].strip()
+    mc_version = fields["mc_version"].strip().lower()
+    size       = fields["size"].strip().lower()
+
+    # -------------------------------<REJECTIONS>-------------------------------
+    if not NAME_PATTERN.match(name):
+        return None, f"`{name}` won't work as a name — stick to letters, numbers, `-`, `_` and `.` (3–32 characters)."
+
+    if size not in SIZES:
+        return None, f"`{size}` isn't a size I know — pick `small`, `medium`, or `large`."
+
+    if not VERSION_PATTERN.match(mc_version):
+        return None, f"`{mc_version}` isn't a version I recognise — try `latest` or something like `1.21.1`."
+
+    # make sure the name isn't already taken in the region.
+    if action == "create" and name in ssm.list_names_under(f"/craftform/regions/{region}/servers/"):
+        return None, f"There's already a server called `{name}` in {region} :("
+
+    # gather the region configs for the build
+    try:
+        config = ssm.region_config(region)
+    except Exception as e:
+        print(f"Couldn't read the region config for {region}: {e} :(")
+        return None, f"`{region}` doesn't look deployed any more — run `/region list` to see what's still up."
+
+    # --------------------------------<HANDOFF>---------------------------------
+    # `or ""` on the discord ids -- an absent one would otherwise reach the buildspec as the
+    # literal string "None", and bash can only sensibly test for empty
     return {
-        "name":          name,
-        "owner":         owner,          # discord user id of whoever ran the command
-        "guild":         guild,          # for /list filtering
-        "region":        region,
-        "type":          server_type,    # vanilla | modpack | custom
-        "spec":          spec,           # what gets hashed for ami reuse
-        "instance_type": instance_type,  # a launch param -- no rebake to resize
-        "bucket":        bucket,
-        "prefix":        prefix,
-        "state":         "baking",
-        "ami_id":        None,           # v-- filled in by the build --v
-        "spec_hash":     None,
-        "instance_id":   None,
-    }
+        "SERVER_NAME":      name,
+        "SERVER_TYPE":      variant,       # vanilla | modpack | custom -- picks the bake recipe
+        "SERVER_ACTION":    action,        # create | save -- both bake, same project
+        "DEPLOY_REGION":    region,
+        "MC_VERSION":       mc_version,    # may be "latest" -- the build makes it concrete
+        "INSTANCE_TYPE":    SIZES[size],   # a launch param -- no rebake to resize
+        "REGION_CONFIG":    json.dumps(config), # re
+        "DISCORD_USER_ID":  body.get("member", body).get("user", {}).get("id") or "",  # owner
+        "DISCORD_GUILD_ID": body.get("guild_id") or "",                                # for /list filtering
+        "DISCORD_APP_ID":   body["application_id"],
+        "DISCORD_TOKEN":    body["token"],  # interaction token, NOT the bot token
+    }, None
 
 
 # ==========================================================================================
