@@ -43,18 +43,10 @@ SIZES = {
 def handle(subcommand, options, body):
 
     # ===============================<START>================================
-    # ROLE: fast toggler. Finishes in this Lambda (sub-second, no defer, no Actions).
-    #   read   record(server_id) -> ami_id + world bucket/prefix
-    #   do     run_instances from the baked ami_id; boot script pulls the world
-    #          from S3 and starts the server (world is NEVER baked into the AMI)
-    #   write  record.state = running, instance_id
     if subcommand == "start":
         pass
 
     # ================================<STOP>=================================
-    # ROLE: fast toggler. Finishes in this Lambda. World persists in S3; EC2 goes away.
-    #   do     ensure the world is synced up to S3, then terminate/stop the instance
-    #   write  record.state = stopped, clear instance_id
     elif subcommand == "stop":
         pass
 
@@ -66,17 +58,20 @@ def handle(subcommand, options, body):
 
         # -------------------------------<VANILLA>-------------------------------
         if variant == "vanilla":
-            # autocomplete SUGGESTS, it doesn't RESTRICT -- discord still lets people
-            # ignore the list and type whatever they like, so check it for real
-            region = args.get("region", "")
 
-            if region not in ssm.list_names_under("/craftform/regions/"):
+            # capture the region they selected. picking from the dropdown sends the CODE,
+            # typing it by hand sends whatever they typed -- resolve() takes either
+            typed  = args.get("region", "")
+            region = regions.resolve(typed)
+
+            # make sure the region is an actual, deployed region
+            if not region or region not in ssm.list_names_under("/craftform/regions/"):
                 return responses.plain_message(
-                    f"`{region}` isn't a deployed region — run `/region list` to see what's available."
+                    f"`{typed}` isn't a deployed region — run `/region list` to see what's available."
                 )
 
             return responses.modal(
-                f"server:form:{variant}:{region}",
+                f"server:form:{variant}:{region}:{subcommand}",
                 f"New {variant} server in {region}",
                 [
                     {
@@ -101,22 +96,20 @@ def handle(subcommand, options, body):
 
         # -------------------------------<MODPACK>-------------------------------
         elif variant == "modpack":
-            pass
-            # FUTURE. args: mrpack_url
+            return responses.plain_message("Modpack servers aren't supported yet — coming soon! :)")
 
         # -------------------------------<CUSTOM>--------------------------------
         elif variant == "custom":
-            pass
-            # FUTURE. args: loader, mc_version
+            return responses.plain_message("Custom servers aren't supported yet — coming soon! :)")
 
     # =========================<CREATE :: THE MODAL SUBMIT>=========================
-    # api gateway is synchronous, so returning the deferred response ENDS this invocation.
-    # everything has to happen before that return :)
+    # api gateway is synchronous, so everything has to happen before the return :)
+
     elif subcommand and subcommand.startswith("form:"):
-        _, variant, region = subcommand.split(":")
+        _, variant, region, action = subcommand.split(":")
 
         # one call does the checking AND the packing -- we get either the handoff or a reason
-        env, error = build_env(variant, region, responses.modal_values(body), body)
+        env, error = build_env(variant, region, responses.modal_values(body), body, action)
 
         # every rejection comes back already worded for the user, so just forward it
         if error:
@@ -129,53 +122,27 @@ def handle(subcommand, options, body):
         return responses.deferred()
 
     # ===============================<DELETE>================================
-    # ROLE: mutator with teeth. Finishes in this Lambda.
-    #   CAUTION: AMIs can be SHARED via dedup. Only delete the ami_id if NO other record
-    #            references it (refcount) -- otherwise you kill a template still in use.
-    #   do     remove the record; remove the world data from S3 (confirm with user first?);
-    #          delete the AMI only when it's unreferenced.
+    
     elif subcommand == "delete":
         pass
 
     # ================================<LIST>=================================
-    # ROLE: reader. Type-blind. Finishes in this Lambda.
-    #   read   record.list(), optionally filtered by region / owner-guild
-    #   do     project each to a short summary line (name, region, state)
     elif subcommand == "list":
         pass
 
     # ===============================<STATUS>================================
-    # ROLE: reader. Finishes in this Lambda.
-    #   read   record.get(server_id) -> state
-    #   do     if running, pull the live public IP from the instance and surface it
     elif subcommand == "status":
         pass
 
     # ===============================<MODIFY>================================
-    # ROLE: mutator. FORKS by what's being changed:
-    #   cheap  -> instance size: just a future launch param. NO rebake. Finishes in Lambda.
-    #   spec   -> version / loader / mods: a DIFFERENT hash = a rebake = create in disguise
-    #             (async -> Actions). v1: REJECT spec changes with "make a new server" until
-    #             the rebake path exists. Only allow the cheap changes for now.
     elif subcommand == "modify":
         pass
 
     # ================================<SAVE>=================================
-    # ROLE: mutator + data stakes. ASYNC -- this is a bake too, so it DEFERS + dispatches
-    #       just like create (not a quick in-Lambda op).
-    #   guard  running servers only
-    #   do     flush the world (save-all flush bracketing), then create-image from the live
-    #          instance -> a NEW template. This is the custom-build "save my mods" loop.
-    #   NOTE   the result is a hand-modified snapshot with no declared spec -> NOT deduped;
-    #          every save produces its own unique template.
     elif subcommand == "save":
         pass
 
     # =================================<GET>==================================
-    # ROLE: reader. Finishes in this Lambda.
-    #   read   record.get(server_id) -> full detail
-    #   do     surface everything, incl. the pack link for modded servers so players can
-    #          install the matching mods client-side (server IP alone won't let them join).
     elif subcommand == "get":
         pass
 
@@ -190,9 +157,9 @@ def handle(subcommand, options, body):
 # this builds everything needed for the codebuild project to run. it does pre-flight checks
 # on the args. It returns the env dict for the build
 # ------------------------------------------------------------------------------------------
-def build_env(variant, region, fields, body, action="create"):
+def build_env(variant, region, fields, body, action):
 
-    name       = fields["name"].strip()
+    name       = fields["name"].strip().lower()
     mc_version = fields["mc_version"].strip().lower()
     size       = fields["size"].strip().lower()
 
@@ -218,8 +185,7 @@ def build_env(variant, region, fields, body, action="create"):
         return None, f"`{region}` doesn't look deployed any more — run `/region list` to see what's still up."
 
     # --------------------------------<HANDOFF>---------------------------------
-    # `or ""` on the discord ids -- an absent one would otherwise reach the buildspec as the
-    # literal string "None", and bash can only sensibly test for empty
+    # returns the env dict for the build, and None for the error if there is any.
     return {
         "SERVER_NAME":      name,
         "SERVER_TYPE":      variant,       # vanilla | modpack | custom -- picks the bake recipe
@@ -227,7 +193,7 @@ def build_env(variant, region, fields, body, action="create"):
         "DEPLOY_REGION":    region,
         "MC_VERSION":       mc_version,    # may be "latest" -- the build makes it concrete
         "INSTANCE_TYPE":    SIZES[size],   # a launch param -- no rebake to resize
-        "REGION_CONFIG":    json.dumps(config), # re
+        "REGION_CONFIG":    json.dumps(config), # dump the server configs as a json in the variables
         "DISCORD_USER_ID":  body.get("member", body).get("user", {}).get("id") or "",  # owner
         "DISCORD_GUILD_ID": body.get("guild_id") or "",                                # for /list filtering
         "DISCORD_APP_ID":   body["application_id"],
@@ -267,17 +233,16 @@ def autocomplete(options, body):
         # get the currently typed value
         typed = (focused.get("value") or "").lower()
 
-        # filter the DEPLOYED (ones in ssm) regions to those matching what's been typed so far.
-        # match on the CODE or the friendly name, so "us-east" and "virginia" both land :)
-        deployed = [
-            code for code in ssm.list_names_under("/craftform/regions/")
-            if typed in code.lower() or typed in regions.label(code).lower()
-        ]
+        # capture the regions that are actually deployed and match what the user typed
+        deployed = []
+        for code in ssm.list_names_under("/craftform/regions/"):
+            if typed in code.lower() or typed in regions.label(code).lower():
+                deployed.append(code)
 
-        # show the friendly name, SEND the code -- discord hands `value` back, not `name`.
-        # same "Name · code" shape /region list uses, so the two commands read alike
+
+        # return only the 
         return responses.autocomplete(
-            [{"name": f"{regions.label(code)}  ·  {code}", "value": code} for code in sorted(deployed)[:25]]
+            [{"name": regions.label(code), "value": code} for code in sorted(deployed, key=regions.label)]
         )
 
     # return nothing if the focused option isn't the region one
@@ -285,9 +250,8 @@ def autocomplete(options, body):
 
 
 # =================================FIND THE FOCUSED OPTION==================================
-# walk down until we hit the option the cursor is actually in. recursive because the depth
-# changes with the command shape -- /server start sits one layer up from /server create
-# vanilla, and only discord knows which we're looking at
+# find the focused option (the one the cursor is in) so we can see if it's something we need
+# to autocomplete
 # ------------------------------------------------------------------------------------------
 def focused_option(options):
     # walk down the options tree until we find the one the cursor is actually in

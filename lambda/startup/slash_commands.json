@@ -3,7 +3,27 @@
     "name": "server",
     "description": "Manage your CraftForm Servers",
     "options": [
-      { "name": "create", "description": "Create a new CraftForm Server", "type": 1 },
+      {
+        "name": "create",
+        "description": "Create a new CraftForm Server",
+        "type": 2,
+        "options": [
+          {
+            "name": "vanilla",
+            "description": "A plain vanilla Minecraft server",
+            "type": 1,
+            "options": [
+              {
+                "name": "region",
+                "description": "Which region to deploy into",
+                "type": 3,
+                "required": true,
+                "autocomplete": true
+              }
+            ]
+          }
+        ]
+      },
       { "name": "delete", "description": "Delete a CraftForm Server", "type": 1 },
       { "name": "start", "description": "Start a CraftForm Server", "type": 1 },
       { "name": "stop", "description": "Stop a CraftForm Server", "type": 1 },
