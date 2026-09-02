@@ -194,6 +194,263 @@ Resources:
                   - logs:PutLogEvents
                 Resource: !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/codebuild/craftform-*:*
 
+  # SERVER BUILD ROLE -- the role the server CodeBuild project bakes under.
+  # deliberately NOT the region role. that one can do anything tagged Project=craftform,
+  # and every player's running server carries that tag -- so a bad bake could reach a live
+  # world. this role can only touch things IT made, which is what Role=builder is for :)
+  #
+  # the bake writes the software onto a scratch EBS volume and snapshots THAT, instead of
+  # CreateImage-ing the builder. a ~1gb snapshot beats an 8gb root snapshot by a mile, and
+  # that wait is the whole reason create feels slow to the user.
+  CodeBuildServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # tags
+      Tags:
+        - Key: Project
+          Value: craftform
+        - Key: Environment
+          Value: HomeRegion
+      RoleName: craftform-server-build # Name of the IAM role the server bakes run as
+      AssumeRolePolicyDocument:
+        # who is allowed to assume this role - the CodeBuild service
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com # only codebuild can assume this
+            Action: sts:AssumeRole
+            Condition:
+              # confused-deputy guard -- same deal as the region role
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+      Policies:
+        # inline policies for the role - permissions that the role has
+        - PolicyName: craftform-server-build-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # ======================= read-only =======================
+              # DescribeImages is the cache check at the top of every bake ("do we already
+              # have this version?"), and the rest is just polling -- is the builder up, is
+              # the volume attached, is the snapshot done yet. ec2 describes ONLY accept '*'
+              # (no arn scoping, no tag scoping), and they're read-only, so this is the safe
+              # kind of broad :)
+              - Sid: ReadOnly
+                Effect: Allow
+                Action:
+                  - ec2:Describe*
+                  - ssm:DescribeParameters
+                Resource: '*'
+
+              # ======================= the build's own source =======================
+              # codebuild pulls the zip itself, but it does it AS this role -- so without
+              # this the project can't even read its own buildspec :(
+              - Sid: BuildSource
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub arn:aws:s3:::craftform-home-${AWS::AccountId}/lambda-code/*
+
+              # ======================= launch the builder =======================
+              # RunInstances touches a pile of resource types at once and only the INSTANCE
+              # and the volumes carry our request tags -- the image/subnet/sg arns can't, so
+              # conditioning the whole action fails closed. that's why it's split in two.
+              - Sid: LaunchBuilderPlumbing
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource:
+                  - arn:aws:ec2:*::image/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:subnet/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:security-group/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:network-interface/*
+
+              # the half that CAN be tagged -- so every builder this role starts is stamped
+              # Role=builder at birth, and every mutate below keys off that stamp
+              - Sid: LaunchBuilderTagged
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource:
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:volume/*
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Project: craftform
+                    aws:RequestTag/Role: builder
+
+              # ======================= the scratch volume =======================
+              # the volume the software actually gets installed onto. same tag-at-birth deal
+              # as the builder -- untagged means unmanageable, so the bake can't skip it.
+              - Sid: CreateScratchVolume
+                Effect: Allow
+                Action: ec2:CreateVolume
+                Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:volume/*
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Project: craftform
+                    aws:RequestTag/Role: builder
+
+              # ======================= snapshot the scratch volume =======================
+              # this IS the artifact -- whether it ends up registered as an ami or just
+              # mounted as a data volume at launch, the snapshot is what survives the bake.
+              #
+              # CreateSnapshot authorizes against TWO resource types at once and they need
+              # opposite conditions: the snapshot is being born (RequestTag, from
+              # --tag-specifications) while the source volume already exists (ResourceTag).
+              # one shared condition would happen to work, but only by accident -- split so
+              # it's obvious which key is guarding what :)
+              - Sid: SnapshotScratchVolume
+                Effect: Allow
+                Action: ec2:CreateSnapshot
+                Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:snapshot/*
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Project: craftform
+
+              - Sid: SnapshotSourceVolume
+                Effect: Allow
+                Action: ec2:CreateSnapshot
+                Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:volume/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Project: craftform
+                    aws:ResourceTag/Role: builder
+
+              # ======================= tag on create =======================
+              # a brand-new resource has no tags yet, so nothing below can authorize its
+              # birth -- chicken n egg, same as the region role's Provision statement. the
+              # CreateAction condition is what stops this being "retag anything you like".
+              - Sid: TagOnCreate
+                Effect: Allow
+                Action: ec2:CreateTags
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    ec2:CreateAction:
+                      - RunInstances
+                      - CreateVolume
+                      - CreateSnapshot
+                      - RegisterImage
+
+              # ======================= drive + wire up the builder =======================
+              # attach/detach need the permission to hold on BOTH the volume AND the
+              # instance, which is exactly why they share the one Role=builder tag.
+              # TerminateInstances is scoped the same way ON PURPOSE -- tagging on
+              # Project=craftform alone would let a runaway bake kill a live server :(
+              - Sid: ManageBuilder
+                Effect: Allow
+                Action:
+                  - ec2:AttachVolume
+                  - ec2:DetachVolume
+                  - ec2:DeleteVolume
+                  - ec2:TerminateInstances
+                  - ec2:StopInstances
+                Resource:
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:volume/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Project: craftform
+                    aws:ResourceTag/Role: builder
+
+              # ======================= publish the image =======================
+              # RegisterImage turns the finished snapshot into a launchable ami, and
+              # DeregisterImage/DeleteSnapshot are the garbage collection -- a rebake of a
+              # version we already have needs to clear out the old one, or the account
+              # slowly fills up with stale amis nobody launches
+              - Sid: PublishImage
+                Effect: Allow
+                Action:
+                  - ec2:RegisterImage
+                  - ec2:DeregisterImage
+                Resource: arn:aws:ec2:*::image/*
+
+              - Sid: PruneSnapshots
+                Effect: Allow
+                Action: ec2:DeleteSnapshot
+                Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:snapshot/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Project: craftform
+
+              # ======================= let the builder be a server =======================
+              # the builder runs under the region's own instance profile rather than a new
+              # role of its own -- it already carries AmazonSSMManagedInstanceCore, which is
+              # what makes SendCommand below work, plus s3 to the world bucket. PassedToService
+              # pins it so this can't be used to hand that role to anything but ec2.
+              - Sid: PassServerProfile
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/minecraft_server_role_*
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ec2.amazonaws.com
+
+              # ======================= run the install =======================
+              # SendCommand over ssm instead of stuffing the install into userdata -- userdata
+              # runs once, silently, and you find out it failed by noticing the bake produced
+              # nothing. this way the build watches the exit code and the output lands in the
+              # build log where you can actually read it :)
+              - Sid: DriveBuilder
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Project: craftform
+                    aws:ResourceTag/Role: builder
+
+              # the document is a separate arn from the instance, and it's an aws-owned one,
+              # so it lives outside our account and can't be tag-scoped
+              - Sid: DriveBuilderDocument
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: arn:aws:ssm:*::document/AWS-RunShellScript
+
+              # polling the command we just sent. no arn to scope to -- the command id only
+              # exists after the send, so this is '*' by necessity
+              - Sid: WatchBuilderCommand
+                Effect: Allow
+                Action:
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommandInvocations
+                Resource: '*'
+
+              # ======================= the server record =======================
+              # build_env never writes the server's ssm record, so the bake does it at the
+              # end -- this is the write that makes the server real to every other subcommand
+              - Sid: ServerRecords
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                  - ssm:PutParameter
+                  - ssm:DeleteParameter
+                  - ssm:AddTagsToResource
+                Resource: !Sub arn:aws:ssm:*:${AWS::AccountId}:parameter/craftform/*
+
+              # ======================= the discord fallback =======================
+              # the interaction token in DISCORD_TOKEN dies 15 minutes after the user hit
+              # submit, and a cold bake can absolutely outrun that. when the followup 404s
+              # the bot token is the only way left to tell them it worked :)
+              - Sid: SecretsRead
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub arn:aws:secretsmanager:*:${AWS::AccountId}:secret:craftform-secrets-*
+
+              # ======================= build logs =======================
+              # same glob the region role uses -- craftform-* already covers craftform-server
+              - Sid: BuildLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/codebuild/craftform-*:*
+
   # LAMBDA OPERATION ROLE - the IAM role that the Lambda function will assume
   LambdaOperationRole:
     Type: AWS::IAM::Role

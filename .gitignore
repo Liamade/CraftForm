@@ -57,6 +57,9 @@ crash.*.log
 .terraformrc
 terraform.rc
 
+# tflint's downloaded plugins, pulled by `tflint --init`
+.tflint.d/
+
 # ==============================================================================
 # Lambda build artifacts
 # ==============================================================================
@@ -73,6 +76,17 @@ lambda-build/   # the release workflow pip-installs deps into here before zippin
 *.key
 secrets.yaml
 secrets.json
+
+# ==============================================================================
+# Nix / direnv
+# ==============================================================================
+# the cached dev shell direnv builds -- big, machine-specific, regenerated on demand
+.direnv/
+# nix build output symlinks
+result
+result-*
+# personal env overrides (AWS_PROFILE etc) that .envrc sources if present
+.envrc.local
 
 # ==============================================================================
 # Editors / IDEs
