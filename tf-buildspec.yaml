@@ -48,6 +48,7 @@ phases:
   install:
     commands:
 
+
     # =======================DOWNLOAD TERRAFORM=======================
     # the image doesn't ship terraform, so we grab it -- github's setup-terraform did this for us
     - curl -fsSL -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"   # -f die on a 404, -s quiet, -S but show errors, -L follow redirects

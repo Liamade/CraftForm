@@ -111,7 +111,7 @@ jobs:
 
           # SANITY CHECK -- if the buildspec didn't make it in, every region deploy is dead, so
           # break the release here instead of letting a user find out weeks later :(
-          unzip -l terraform.zip | grep -q 'buildspec.yaml' || { echo "buildspec.yaml missing from terraform.zip :("; exit 1; }
+          unzip -l terraform.zip | grep -q 'tf-buildspec.yaml' || { echo "buildspec.yaml missing from terraform.zip :("; exit 1; }
 
       # CREATE GITHUB RELEASE: create a new release in GitHub using the version number from the workflow input
       - name: Publish Release
